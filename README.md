@@ -33,11 +33,4 @@ Since the app is not yet on Flathub, you can build and install it locally:
    ```bash
    flatpak install flathub org.gnome.Platform//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
 
-
-
-
-
-
-
-
 AI Disclosure: This was built using AI (Gemini and Deepseek).
