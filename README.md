@@ -33,9 +33,11 @@ Since the app is not yet on Flathub, you can build and install it locally:
    ```bash
    flatpak install flathub org.gnome.Platform//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
 2 Clone the repo and build:
+   ```bash
 git clone https://github.com/richardeaves900-pixel/HiFi-Verify.git
 cd HiFi-Verify/flatpak
 flatpak-builder --user --install --force-clean build-dir org.cachyos.HiFiVerify.yaml
+
 
 
 
