@@ -19,4 +19,16 @@ Unlike standard system monitors, HiFi Verify reads directly from the hardware (`
 *   **KDE Plasma Widget:** A custom plasmoid that sits in your system tray and turns **Green** (bit-perfect), **Red** (compromised/processing), or **Gray** (idle).
 *   **Sandbox Safe:** Fully compliant Flatpak architecture using `flatpak-spawn --host` to bridge the sandbox for hardware telemetry.
 
+Screenshot
+<img width="1733" height="1155" alt="image" src="https://github.com/user-attachments/assets/cc3cf694-0a23-4b1c-9d29-0e8c1809d914" />
+
+
 ---
+🚀 Installation
+
+### Option 1: Flatpak (Recommended)
+Since the app is not yet on Flathub, you can build and install it locally:
+
+1. Ensure you have the required runtimes:
+   ```bash
+   flatpak install flathub org.gnome.Platform//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
