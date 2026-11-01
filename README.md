@@ -33,4 +33,13 @@ Since the app is not yet on Flathub, you can build and install it locally:
    ```bash
    flatpak install flathub org.gnome.Platform//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
 
-AI Disclosure: This was built using AI (Gemini and Deepseek).
+### Option 2: Build from Source (Host)
+
+Requires Rust (1.92+), GTK4 development headers, and PipeWire.
+
+**1. Clone the repository:**
+```bash
+git clone https://github.com/richardeaves900-pixel/HiFi-Verify.git
+cd HiFi-Verify
+
+
