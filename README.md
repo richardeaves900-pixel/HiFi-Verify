@@ -33,20 +33,13 @@ Since the app is not yet on Flathub, you can build and install it locally:
    ```bash
    flatpak install flathub org.gnome.Platform//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
 
-Option 2: Build from Source (Host)
-
-Requires Rust (1.92+), GTK4 development headers, and PipeWire.
-
-Step 1: Clone the repository:
-bash
-
+2C one the repo and build
+```bash
 git clone https://github.com/richardeaves900-pixel/HiFi-Verify.git
-cd HiFi-Verify
+cd HiFi-Verify/flatpak
+flatpak-builder --user --install --force-clean build-dir org.cachyos.HiFiVerify.yaml
+```
 
-Step 2: Build and run:
-bash
-
-cargo build --release
-./target/release/hifi-verify --gui
+Note: If cargo-sources.json is out of date, run python3 flatpak-cargo-generator.py Cargo.lock -o flatpak/cargo-sources.json first.
 
 
