@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.cachyos.HiFiVerify</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>HiFi Verify</name>
+  <summary>PipeWire Audiophile Verification Suite</summary>
+  <description>
+    <p>Real-time PipeWire verification, hardware format inspection, codec detection, and bit-perfect auditing. Rust rewrite of the original Python suite, with sub-100ms CLI startup and native GTK4 rendering.</p>
+  </description>
+  <launchable type="desktop-id">org.cachyos.HiFiVerify.desktop</launchable>
+</component>

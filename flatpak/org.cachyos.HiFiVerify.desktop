@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=HiFi Verify
+Comment=PipeWire Audiophile Verification Suite
+Exec=hifi-verify
+Icon=org.cachyos.HiFiVerify
+Terminal=false
+Type=Application
+StartupNotify=true
+StartupWMClass=org.cachyos.HiFiVerify
+Categories=AudioVideo;Audio;Monitor;

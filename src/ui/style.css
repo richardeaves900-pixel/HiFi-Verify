@@ -1,0 +1,33 @@
+window { background-color: #080d11; color: #e4e4e7; font-family: monospace; }
+.card { background-color: #0c141b; border-radius: 10px; padding: 10px; border: 1px solid #1e293b; }
+.card-green { border-color: #10b981; }
+.card-cyan { border-color: #06b6d4; }
+.card-gold { border-color: #f59e0b; }
+.card-purple { border-color: #a855f7; }
+.signal-bar { background-color: #0a1118; border-radius: 8px; padding: 7px 12px; border: 1px solid #1e293b; }
+.topbar-box { background-color: #0a1118; border-radius: 8px; padding: 6px 10px; border: 1px solid #1e293b; }
+.title-sm { font-size: 11px; color: #94a3b8; font-weight: bold; }
+.val-green { font-size: 25px; font-weight: bold; color: #10b981; }
+.val-cyan { font-size: 23px; font-weight: bold; color: #22d3ee; }
+.val-gold { font-size: 22px; font-weight: bold; color: #fbbf24; }
+.val-purple { font-size: 23px; font-weight: bold; color: #c084fc; }
+.sub-text { font-size: 10px; color: #64748b; }
+.sub-green { font-size: 10px; color: #10b981; font-weight: bold; }
+.sub-purple { font-size: 10px; color: #c084fc; }
+.sub-red { font-size: 10px; color: #f87171; font-weight: bold; }
+.chain-text { font-size: 11px; color: #e2e8f0; font-weight: bold; }
+.row-hdr { font-size: 11px; color: #94a3b8; font-weight: bold; padding: 4px 6px; border-bottom: 1px solid #1e293b; }
+.row-run { font-size: 12px; color: #34d399; padding: 3px 6px; }
+.row-idle { font-size: 12px; color: #94a3b8; padding: 3px 6px; }
+.row-warn { font-size: 12px; color: #fbbf24; padding: 3px 6px; }
+.btn-cyber { background: #111c24; color: #cbd5e1; border: 1px solid #1e293b; border-radius: 6px; padding: 5px 8px; font-size: 11px; }
+.btn-cyber:hover { border-color: #22d3ee; color: #22d3ee; }
+.btn-app-purple { background: #1a1128; color: #d8b4fe; border: 1px solid #7e22ce; border-radius: 6px; padding: 5px 10px; font-size: 11px; font-weight: bold; }
+.btn-app-purple:hover { border-color: #c084fc; color: #ffffff; }
+.btn-app-cyan { background: #0c222e; color: #67e8f9; border: 1px solid #0891b2; border-radius: 6px; padding: 5px 10px; font-size: 11px; font-weight: bold; }
+.btn-app-cyan:hover { border-color: #22d3ee; color: #ffffff; }
+.btn-app-green { background: #0a221c; color: #6ee7b7; border: 1px solid #059669; border-radius: 6px; padding: 5px 10px; font-size: 11px; font-weight: bold; }
+.btn-app-green:hover { border-color: #10b981; color: #ffffff; }
+
+.card-interactive { transition: background-color 0.2s, border-color 0.2s; }
+.card-interactive:hover { background-color: #111c24; border-color: #475569; }

@@ -1,0 +1,47 @@
+app-id: org.cachyos.HiFiVerify
+runtime: org.gnome.Platform
+runtime-version: "49"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: hifi-verify
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/pwtop-rs/cargo
+
+finish-args:
+  - --share=network
+  - --socket=pulseaudio
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --talk-name=org.freedesktop.Flatpak
+  - --talk-name=org.mpris.MediaPlayer2.*
+  - --filesystem=xdg-run/pipewire-0
+
+modules:
+  - name: pwtop-rs
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release
+      - install -D -m 755 target/release/hifi-verify /app/bin/hifi-verify
+      - install -D -m 644 org.cachyos.HiFiVerify.desktop /app/share/applications/org.cachyos.HiFiVerify.desktop
+      - install -D -m 644 org.cachyos.HiFiVerify.svg /app/share/icons/hicolor/scalable/apps/org.cachyos.HiFiVerify.svg
+      - install -D -m 644 org.cachyos.HiFiVerify.metainfo.xml /app/share/metainfo/org.cachyos.HiFiVerify.metainfo.xml
+    sources:
+      - cargo-sources.json
+      - type: file
+        path: ../Cargo.toml
+      - type: file
+        path: ../Cargo.lock
+      - type: dir
+        path: ../src
+        dest: src
+      - type: file
+        path: org.cachyos.HiFiVerify.desktop
+      - type: file
+        path: org.cachyos.HiFiVerify.svg
+      - type: file
+        path: org.cachyos.HiFiVerify.metainfo.xml

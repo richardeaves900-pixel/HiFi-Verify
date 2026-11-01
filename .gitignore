@@ -1,0 +1,5 @@
+/target
+/flatpak/build-dir
+/flatpak/.flatpak-builder
+*.log
+.DS_Store
