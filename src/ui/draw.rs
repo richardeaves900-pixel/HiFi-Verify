@@ -83,108 +83,106 @@ pub fn gauge(cr: &Context, w: f64, h: f64, load: f64) {
     }
 }
 
-pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
-    cr.set_source_rgba(0.03, 0.05, 0.07, 0.9);
-    cr.rectangle(0.0, 0.0, w, h);
-    let _ = cr.fill();
-
-    cr.select_font_face(
-        "monospace",
-        cairo::FontSlant::Normal,
-        cairo::FontWeight::Bold,
-    );
-    cr.set_font_size(12.0);
-
-    let box_w = w - 40.0;
-    let box_h = 50.0;
-    let x = 20.0;
-
-    let trunc = |s: &str, max: usize| -> String {
-        if s.len() > max {
-            format!("{}...", &s[0..max - 3])
-        } else {
-            s.to_string()
+/// Draw text clipped to the current panel width; never index UTF-8 by bytes.
+fn fitted_text(cr: &Context, text: &str, width: f64) -> String {
+    if width <= 0.0 {
+        return String::new();
+    }
+    let fits = |s: &str| {
+        cr.text_extents(s)
+            .is_ok_and(|size| size.x_advance() <= width)
+    };
+    if fits(text) {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    for count in (0..chars.len()).rev() {
+        let candidate = chars[..count].iter().collect::<String>() + "…";
+        if fits(&candidate) {
+            return candidate;
         }
-    };
+    }
+    String::new()
+}
 
-    let src_text = format!(
-        "{} | {}",
-        trunc(&anim.matrix_src_app, 15),
-        trunc(&anim.matrix_src_codec, 20)
-    );
-    let dsp_text = if anim.matrix_dsp.is_empty() || anim.matrix_dsp == "---" {
-        "No PipeWire DSP detected".to_string()
+pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
+    if w < 55.0 || h < 95.0 {
+        return;
+    }
+    cr.save().ok();
+    cr.rectangle(0.0, 0.0, w, h);
+    cr.clip();
+    cr.set_source_rgba(0.03, 0.05, 0.07, 0.9);
+    cr.paint().ok();
+
+    let inset = 9.0;
+    let gap = if h >= 200.0 { 9.0 } else { 5.0 };
+    let status_room = if h >= 195.0 { 26.0 } else { 0.0 };
+    let box_w = w - 2.0 * inset;
+    let box_h = ((h - status_room - 4.0 * gap) / 3.0).max(25.0);
+    let text_w = (box_w - 16.0).max(0.0);
+
+    let src = format!("{} | {}", anim.matrix_src_app, anim.matrix_src_codec);
+    let dsp = if anim.matrix_dsp.trim().is_empty() || anim.matrix_dsp == "---" {
+        "No PipeWire DSP reported".to_string()
     } else {
-        trunc(&anim.matrix_dsp, 38)
+        anim.matrix_dsp.clone()
     };
-    let hw_text = if anim.matrix_rate > 0.0 {
+    let dac = if anim.matrix_rate > 0.0 {
         format!("{} @ {:.1}kHz", anim.matrix_hw_fmt, anim.matrix_rate)
     } else {
         "No open DAC PCM".to_string()
     };
-
     let steps = [
-        ("SOURCE", &src_text, 0.6, 0.4, 1.0),
-        ("DSP / PROCESSING", &dsp_text, 1.0, 0.8, 0.4),
-        ("DAC BUS", &hw_text, 0.4, 0.8, 0.6),
+        ("SOURCE", src.as_str(), (0.6, 0.4, 1.0)),
+        ("DSP / PROCESSING", dsp.as_str(), (1.0, 0.8, 0.4)),
+        ("DAC BUS", dac.as_str(), (0.4, 0.8, 0.6)),
     ];
-
-    let gap = (h - (3.0 * box_h)) / 4.0;
-    let mut last_y = 0.0;
-
-    for (i, (title, val, r, g, b)) in steps.iter().enumerate() {
-        let y = gap + (i as f64 * (box_h + gap));
-
-        cr.set_source_rgba(*r, *g, *b, 0.1);
-        cr.rectangle(x, y, box_w, box_h);
-        let _ = cr.fill();
-
-        cr.set_source_rgba(*r, *g, *b, 0.8);
-        cr.rectangle(x, y, box_w, box_h);
+    for (i, (title, value, (r, g, b))) in steps.iter().enumerate() {
+        let y = gap + i as f64 * (box_h + gap);
+        cr.set_source_rgba(*r, *g, *b, 0.12);
+        cr.rectangle(inset, y, box_w, box_h);
+        cr.fill().ok();
+        cr.set_source_rgba(*r, *g, *b, 0.85);
         cr.set_line_width(1.0);
-        let _ = cr.stroke();
-
-        cr.set_source_rgba(*r, *g, *b, 0.9);
-        cr.move_to(x + 10.0, y + 18.0);
-        let _ = cr.show_text(title);
-
-        cr.set_source_rgba(0.9, 0.9, 0.9, 1.0);
-        cr.move_to(x + 10.0, y + 38.0);
-        let _ = cr.show_text(val);
-
-        if i < 2 {
-            let arrow_x = w / 2.0;
-            let arrow_y_start = y + box_h;
-            let arrow_y_end = y + box_h + gap;
-
-            cr.set_source_rgba(0.5, 0.6, 0.7, 0.5);
-            cr.set_line_width(2.0);
-            cr.move_to(arrow_x, arrow_y_start);
-            cr.line_to(arrow_x, arrow_y_end);
-            let _ = cr.stroke();
-
-            cr.move_to(arrow_x - 5.0, arrow_y_end - 8.0);
-            cr.line_to(arrow_x, arrow_y_end);
-            cr.line_to(arrow_x + 5.0, arrow_y_end - 8.0);
-            let _ = cr.stroke();
-        }
-        last_y = y;
+        cr.rectangle(inset + 0.5, y + 0.5, box_w - 1.0, box_h - 1.0);
+        cr.stroke().ok();
+        cr.save().ok();
+        cr.rectangle(inset + 3.0, y + 2.0, box_w - 6.0, box_h - 4.0);
+        cr.clip();
+        cr.select_font_face(
+            "monospace",
+            cairo::FontSlant::Normal,
+            cairo::FontWeight::Bold,
+        );
+        cr.set_font_size(9.0);
+        cr.set_source_rgba(*r, *g, *b, 1.0);
+        cr.move_to(inset + 8.0, y + 12.0);
+        cr.show_text(&fitted_text(cr, title, text_w)).ok();
+        cr.set_font_size(10.0);
+        cr.set_source_rgb(0.91, 0.93, 0.96);
+        cr.move_to(inset + 8.0, y + box_h - 8.0);
+        cr.show_text(&fitted_text(cr, value, text_w)).ok();
+        cr.restore().ok();
     }
-
-    cr.set_source_rgba(0.5, 0.6, 0.7, 0.8);
-    cr.set_font_size(10.0);
-    cr.move_to(x + 10.0, last_y + box_h + gap + 10.0);
-    let _ = cr.show_text(&format!("Hardware Path: {}", hw_text));
-
-    // ALSA Bit-Perfect Status
-    let (color, icon) = if anim.alsa_bitperfect {
-        ((0.06, 0.72, 0.5), "✓")
-    } else {
-        ((0.96, 0.62, 0.04), "⚠")
-    };
-    cr.set_source_rgba(color.0, color.1, color.2, 1.0);
-    cr.move_to(x + 10.0, last_y + box_h + gap + 28.0);
-    let _ = cr.show_text(&format!("{} ALSA: {}", icon, anim.alsa_reason));
+    if status_room > 0.0 {
+        cr.select_font_face(
+            "monospace",
+            cairo::FontSlant::Normal,
+            cairo::FontWeight::Bold,
+        );
+        cr.set_font_size(9.0);
+        let (status, color) = if anim.alsa_bitperfect {
+            ("PCM path clear (identity unverified)", (0.06, 0.72, 0.5))
+        } else {
+            (anim.alsa_reason.as_str(), (0.96, 0.62, 0.04))
+        };
+        cr.set_source_rgb(color.0, color.1, color.2);
+        cr.move_to(inset + 3.0, h - 9.0);
+        cr.show_text(&fitted_text(cr, status, w - 2.0 * inset - 6.0))
+            .ok();
+    }
+    cr.restore().ok();
 }
 
 pub fn scope(cr: &Context, w: f64, h: f64, jitter: &[f64]) {

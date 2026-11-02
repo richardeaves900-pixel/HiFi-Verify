@@ -162,7 +162,8 @@ fn build_ui(
     let vol_icon = gtk::Label::new(Some("🔊"));
     let vol_slider = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
     vol_slider.set_draw_value(false);
-    vol_slider.set_size_request(84, -1);
+    vol_slider.set_size_request(92, 24);
+    vol_slider.set_valign(gtk::Align::Center);
     vol_slider.set_value(crate::volume::get_volume());
     vol_slider.set_tooltip_text(Some("PipeWire sink volume (may use software gain)"));
 
@@ -273,6 +274,106 @@ fn build_ui(
     extra_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     extra_scroll.set_child(Some(&extra_tools));
     tools_content.append(&extra_scroll);
+    // Read-only monitoring remains the default. These two explicit user actions
+    // only change PipeWire's runtime metadata; they never write configuration.
+    let rate_tools = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let btn_match_rate = gtk::Button::with_label("Match stream rate (temporary)");
+    btn_match_rate.set_tooltip_text(Some(
+        "Requests the playing PCM rate for the whole PipeWire graph. May interrupt other audio. Not persistent."
+    ));
+    let btn_auto_rate = gtk::Button::with_label("Release forced rate / Auto");
+    btn_auto_rate.set_tooltip_text(Some(
+        "Remove a temporary rate override and return PipeWire to its own policy.",
+    ));
+    let rate_feedback = gtk::Label::new(Some("No rate override requested by HiFi Verify"));
+    rate_feedback.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    rate_feedback.set_xalign(0.0);
+    let (rate_tx, rate_rx) = std::sync::mpsc::channel::<String>();
+    {
+        let tx = rate_tx.clone();
+        btn_match_rate.connect_clicked(move |_| {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let graph = crate::telemetry::PwGraph::load();
+                let (rows, _, _, _) = crate::pwtop::parse_pw_top();
+                let rate = graph.pcm_for_route(&rows).map(|p| p.rate);
+                let message = match rate {
+                    Some(rate)
+                        if [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000]
+                            .contains(&rate) =>
+                    {
+                        let value = rate.to_string();
+                        match crate::host::host_cmd(
+                            &[
+                                "pw-metadata",
+                                "-n",
+                                "settings",
+                                "0",
+                                "clock.force-rate",
+                                &value,
+                            ],
+                            Duration::from_secs(3),
+                        ) {
+                            Ok(output) if output.status.success() => {
+                                format!("Requested {} Hz globally; check the DAC reading", rate)
+                            }
+                            Ok(output) => format!(
+                                "Rate request failed: {}",
+                                String::from_utf8_lossy(&output.stderr).trim()
+                            ),
+                            Err(err) => format!("Rate request failed: {err}"),
+                        }
+                    }
+                    Some(rate) => format!("Unsupported/unsafe automatic request: {rate} Hz"),
+                    None => "Active linked stream rate unavailable; no settings changed".into(),
+                };
+                let _ = tx.send(message);
+            });
+        });
+    }
+    {
+        let tx = rate_tx.clone();
+        btn_auto_rate.connect_clicked(move |_| {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let msg = match crate::host::host_cmd(
+                    &[
+                        "pw-metadata",
+                        "-n",
+                        "settings",
+                        "0",
+                        "clock.force-rate",
+                        "0",
+                    ],
+                    Duration::from_secs(3),
+                ) {
+                    Ok(output) if output.status.success() => {
+                        "Removed rate override; PipeWire auto policy restored".to_string()
+                    }
+                    Ok(output) => format!(
+                        "Could not release rate override: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    Err(err) => format!("Could not release rate override: {err}"),
+                };
+                let _ = tx.send(msg);
+            });
+        });
+    }
+    {
+        let feedback = rate_feedback.clone();
+        glib::timeout_add_local(Duration::from_millis(150), move || {
+            while let Ok(message) = rate_rx.try_recv() {
+                feedback.set_text(&message);
+                feedback.set_tooltip_text(Some(&message));
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+    rate_tools.append(&btn_match_rate);
+    rate_tools.append(&btn_auto_rate);
+    tools_content.append(&rate_tools);
+    tools_content.append(&rate_feedback);
     tools_expander.set_child(Some(&tools_content));
     root.append(&tools_expander);
 
@@ -468,7 +569,7 @@ fn build_ui(
 
     // ---- Body ------------------------------------------------------------
     let body = gtk::Box::new(gtk::Orientation::Horizontal, 7);
-    body.set_vexpand(true);
+    body.set_vexpand(false);
 
     // Left: node table
     let left = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -484,6 +585,8 @@ fn build_ui(
     scroll.set_vexpand(true);
     scroll.set_hexpand(true);
     scroll.set_min_content_width(260);
+    scroll.set_min_content_height(240);
+    scroll.set_max_content_height(320);
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     scroll.set_child(Some(&node_box));
     left.append(&scroll);
@@ -492,7 +595,7 @@ fn build_ui(
     // Right: spectrum + scope + controls
     let right = gtk::Box::new(gtk::Orientation::Vertical, 8);
     right.add_css_class("card");
-    right.set_size_request(225, -1);
+    right.set_size_request(230, -1);
 
     let toggle_btn = gtk::ToggleButton::with_label("SIGNAL PATH MATRIX");
     toggle_btn.add_css_class("btn-cyber");
@@ -502,8 +605,8 @@ fn build_ui(
     crate::cava::spawn_cava_worker(spec_data.clone());
 
     let spec_area = gtk::DrawingArea::new();
-    spec_area.set_content_height(135);
-    spec_area.set_vexpand(true);
+    spec_area.set_content_height(195);
+    spec_area.set_vexpand(false);
     right.append(&spec_area);
 
     right.append(&label("LATENCY JITTER (us)", "title-sm", false));
@@ -525,12 +628,9 @@ fn build_ui(
     // space consumers in the compact dashboard.
     let details_expander = gtk::Expander::new(Some("More details: nodes & signal graphs"));
     details_expander.set_expanded(false);
-    let detail_scroll = gtk::ScrolledWindow::new();
-    detail_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    detail_scroll.set_min_content_height(235);
-    detail_scroll.set_max_content_height(340);
-    detail_scroll.set_child(Some(&body));
-    details_expander.set_child(Some(&detail_scroll));
+    // Avoid a scrolled-window-in-scrolled-window chain (zero-size GTK sliders).
+    // The node list scrolls independently; the outer window scrolls vertically.
+    details_expander.set_child(Some(&body));
     root.append(&details_expander);
 
     // Static footer removed to keep the default dashboard compact.
@@ -1126,12 +1226,18 @@ fn render(
     // Check for DSP notifications
     {
         let mut a = anim.borrow_mut();
-        if snap.stream.source_processing.is_some() {
+        if !snap.processing.is_empty() || snap.stream.source_processing.is_some() {
             if !a.is_processing {
                 a.is_processing = true;
+                let reason = snap
+                    .stream
+                    .source_processing
+                    .as_deref()
+                    .or_else(|| snap.processing.first().map(String::as_str))
+                    .unwrap_or("Audio processing detected");
                 let _ = notify_rust::Notification::new()
-                    .summary("HiFi Verify: Compromised")
-                    .body(&format!("DSP active: {}", snap.processing[0]))
+                    .summary("HiFi Verify: Processing detected")
+                    .body(reason)
                     .icon("dialog-warning")
                     .show();
             }
