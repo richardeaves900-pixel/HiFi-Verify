@@ -7,9 +7,12 @@ pub fn scan_network() -> Vec<String> {
         Ok(s) => s,
         Err(_) => return devices,
     };
-    socket
+    if socket
         .set_read_timeout(Some(Duration::from_millis(1000)))
-        .unwrap();
+        .is_err()
+    {
+        return devices;
+    }
 
     let msg = "M-SEARCH * HTTP/1.1\r\n\
                HOST: 239.255.255.250:1900\r\n\

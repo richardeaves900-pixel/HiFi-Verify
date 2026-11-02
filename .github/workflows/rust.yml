@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "perf/local-optimisations" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,5 +20,8 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libgtk-4-dev libpipewire-0.3-dev libasound2-dev pkg-config
         
-    - name: Build
-      run: cargo build --verbose
+    - name: Check, test, and build
+      run: |
+        cargo fmt --all -- --check
+        cargo test --locked --verbose
+        cargo build --locked --verbose

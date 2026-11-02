@@ -33,28 +33,29 @@ pub fn log_xruns(count: u64) {
 
 pub fn get_history_summary() -> String {
     let mut summary = String::new();
-    match init_db() {
-        Ok(conn) => {
-            let mut stmt = conn
-                .prepare("SELECT timestamp, count FROM xruns ORDER BY timestamp DESC LIMIT 50")
-                .unwrap();
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })
-                .unwrap();
-
-            summary.push_str("--- XRUN History (Last 50) ---\n\n");
-            let mut found = false;
-            for row in rows.flatten() {
-                summary.push_str(&format!("{} | {} dropped frames\n", row.0, row.1));
-                found = true;
-            }
-            if !found {
-                summary.push_str("No XRUNs logged yet. Your audio is pristine!");
-            }
-        }
-        Err(e) => summary.push_str(&format!("Failed to read database: {}", e)),
+    let conn = match init_db() {
+        Ok(conn) => conn,
+        Err(err) => return format!("Failed to open XRUN history: {err}"),
+    };
+    let mut stmt =
+        match conn.prepare("SELECT timestamp, count FROM xruns ORDER BY timestamp DESC LIMIT 50") {
+            Ok(stmt) => stmt,
+            Err(err) => return format!("Failed to prepare XRUN history: {err}"),
+        };
+    let rows = match stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    }) {
+        Ok(rows) => rows,
+        Err(err) => return format!("Failed to query XRUN history: {err}"),
+    };
+    summary.push_str("--- XRUN History (Last 50) ---\n\n");
+    let mut found = false;
+    for row in rows.flatten() {
+        summary.push_str(&format!("{} | {} reported XRUN(s)\n", row.0, row.1));
+        found = true;
+    }
+    if !found {
+        summary.push_str("No new XRUNs logged yet.");
     }
     summary
 }

@@ -238,14 +238,17 @@ pub fn build_audit(fast: bool) -> Audit {
         findings.push(Finding {
             severity: "ok",
             check: "Processing",
-            detail: "No PipeWire DSP/filter nodes detected (upstream processing not excluded)"
+            detail: "No PipeWire DSP/filter nodes observed (upstream processing not excluded)"
                 .into(),
         });
     } else {
         findings.push(Finding {
-            severity: "warn",
+            severity: "info",
             check: "Processing",
-            detail: format!("Active: {}", graph.processing.join(", ")),
+            detail: format!(
+                "DSP/filter nodes running; not proof they are on the playback route: {}",
+                graph.processing.join(", ")
+            ),
         });
     }
 
@@ -307,9 +310,9 @@ pub fn build_audit(fast: bool) -> Audit {
 
     if !fast {
         findings.push(Finding {
-            severity: if total_err == 0 { "ok" } else { "warn" },
+            severity: if total_err == 0 { "ok" } else { "info" },
             check: "XRUNs",
-            detail: format!("{} xrun(s)", total_err),
+            detail: format!("{} cumulative xrun(s); not necessarily new", total_err),
         });
     } else {
         findings.push(Finding {

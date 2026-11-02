@@ -6,7 +6,9 @@ pub fn spawn_cava_worker(bands: Arc<Mutex<Vec<f64>>>) {
     std::thread::spawn(move || {
         let config = "[general]\nbars = 32\n\n[output]\nmethod = raw\nraw_target = /dev/stdout\ndata_format = ascii\nascii_max_range = 100\nchannels = mono\n";
         let config_path = "/tmp/hfv_cava.conf";
-        std::fs::write(config_path, config).unwrap();
+        if std::fs::write(config_path, config).is_err() {
+            return;
+        }
 
         let in_flatpak = std::path::Path::new("/.flatpak-info").exists();
         let mut cmd = if in_flatpak {
@@ -24,7 +26,9 @@ pub fn spawn_cava_worker(bands: Arc<Mutex<Vec<f64>>>) {
             Err(_) => return,
         };
 
-        let stdout = child.stdout.take().unwrap();
+        let Some(stdout) = child.stdout.take() else {
+            return;
+        };
         let reader = BufReader::new(stdout);
 
         for line in reader.lines() {

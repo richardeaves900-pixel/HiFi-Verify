@@ -20,7 +20,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(version, about = "HiFi Verify")]
 struct Args {
-    /// One-line health summary (fast, no pw-top)
+    /// One-line health summary (uses live PipeWire PCM observations)
     #[arg(long)]
     health: bool,
 
@@ -32,7 +32,7 @@ struct Args {
     #[arg(long)]
     audit: bool,
 
-    /// Skip pw-top in --audit (fast mode, no XRUN data)
+    /// Skip XRUN evaluation in --audit (PCM observation still uses pw-top)
     #[arg(long)]
     fast: bool,
 
@@ -92,35 +92,26 @@ fn main() -> std::process::ExitCode {
     }
 
     if args.status {
-        let a = audit::build_audit(true);
-
-        let mut state = "red";
-        let mut reason = "Compromised";
-
-        if a.verdict.contains("IDLE") {
-            state = "gray";
-            reason = "Standby";
-        } else if a.verdict.contains("POTENTIALLY BIT-PERFECT") {
-            state = "green";
-            reason = "Rate match (unverified)";
-        } else if a.verdict.starts_with("UNVERIFIED") {
-            state = "amber";
-            reason = if a.verdict.contains("graph/source rate") {
-                "Graph/source rate discrepancy"
-            } else {
-                "Source sample rate unknown"
-            };
-        } else {
-            // If it's not bit-perfect, figure out why for the tooltip
-            if !a.processing.is_empty() {
-                reason = &a.processing[0]; // e.g., "easyeffects_sink"
-            } else if a.verdict.contains("Rate mismatch") {
-                reason = "Resampling";
-            }
-        }
-
-        // Output strict JSON
-        println!("{{\"state\": \"{}\", \"reason\": \"{}\"}}", state, reason);
+        let audit = audit::build_audit(true);
+        let (state, reason) = match audit.audio_path_status {
+            "idle" => ("gray", "Standby".to_string()),
+            "clear" => (
+                "green",
+                "Connected PCM path clear (samples unverified)".to_string(),
+            ),
+            "altered" => (
+                "red",
+                audit
+                    .findings
+                    .iter()
+                    .find(|f| f.check == "Connected PCM route")
+                    .map(|f| f.detail.clone())
+                    .unwrap_or_else(|| "Playback path alteration observed".to_string()),
+            ),
+            _ => ("amber", "Playback PCM path not fully verified".to_string()),
+        };
+        // Always serialize: player/process names can contain quotes or Unicode.
+        println!("{}", serde_json::json!({"state": state, "reason": reason}));
         return std::process::ExitCode::SUCCESS;
     }
 
