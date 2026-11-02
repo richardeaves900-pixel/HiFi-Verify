@@ -104,3 +104,15 @@ GTK4 requires all UI updates to happen on the main thread:
 * A background `std::thread` polls the hardware every 500ms.
 * It sends a `Snapshot` struct via `std::sync::mpsc` channel.
 * A `glib::timeout_add_local` loop drains the channel and updates the UI.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🙏 Acknowledgements & Disclosures
+
+* **[gtk-rs](https://gtk-rs.org/)** – Used for building the native Linux user interface.
+* **pw-top Visualizer** – Inspired by the original Python prototype.
+* **AI Disclosure** – This project was developed with assistance from AI models (Gemini and DeepSeek).
