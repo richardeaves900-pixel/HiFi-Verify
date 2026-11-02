@@ -18,12 +18,14 @@ struct Snapshot {
     rows: Vec<NodeRow>,
     sinks: Vec<Sink>,
     stream: StreamInfo,
+    path: Option<telemetry::PcmPathAssessment>,
     processing: Vec<String>,
     hw: Vec<HwParams>,
     driver_rate: Option<u32>,
     driver_quantum: Option<u32>,
     total_err: u64,
     wait_us: Option<f64>,
+    volume: Option<f64>,
 }
 
 struct Ui {
@@ -49,7 +51,11 @@ pub fn run(
     tray_handle: Option<ksni::blocking::Handle<crate::tray::HiFiTray>>,
 ) {
     let app = gtk::Application::builder()
-        .application_id("org.cachyos.HiFiVerify")
+        .application_id(if std::env::var_os("HIFI_VERIFY_DEV").is_some() {
+            "org.cachyos.HiFiVerify.Dev"
+        } else {
+            "org.cachyos.HiFiVerify"
+        })
         .build();
 
     let tray_rx_shared = std::sync::Arc::new(std::sync::Mutex::new(tray_rx));
@@ -145,17 +151,29 @@ fn build_ui(
     vol_slider.set_draw_value(false);
     vol_slider.set_size_request(100, -1);
     vol_slider.set_value(crate::volume::get_volume());
-    vol_slider.set_tooltip_text(Some("Hardware DAC Volume (Bit-Perfect)"));
+    vol_slider.set_tooltip_text(Some("PipeWire sink volume (may use software gain)"));
 
-    {
-        vol_slider.connect_value_changed(move |s| {
-            if !s.is_focus() && !s.has_focus() { 
-                // Only update via drag
+    // GTK must not wait for wpctl on each slider movement. A dedicated worker
+    // consumes pending values, keeping only the most recent during a drag.
+    let updating_volume = Rc::new(Cell::new(false));
+    let (volume_tx, volume_rx) = std::sync::mpsc::channel::<f64>();
+    std::thread::spawn(move || {
+        while let Ok(mut value) = volume_rx.recv() {
+            while let Ok(newer) = volume_rx.try_recv() {
+                value = newer;
             }
-            crate::volume::set_volume(s.value());
+            crate::volume::set_volume(value);
+        }
+    });
+    {
+        let updating_volume = updating_volume.clone();
+        vol_slider.connect_value_changed(move |s| {
+            if !updating_volume.get() {
+                let _ = volume_tx.send(s.value());
+            }
         });
     }
-    
+
     vol_box.append(&vol_icon);
     vol_box.append(&vol_slider);
     topbar.append(&vol_box);
@@ -163,7 +181,7 @@ fn build_ui(
     // Media Controls
     let media_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     media_box.add_css_class("btn-cyber");
-    
+
     let btn_prev = gtk::Button::with_label("⏮");
     btn_prev.set_tooltip_text(Some("Previous Track"));
     btn_prev.connect_clicked(|_| crate::telemetry::send_mpris_command("Previous"));
@@ -178,7 +196,7 @@ fn build_ui(
     btn_next.set_tooltip_text(Some("Next Track"));
     btn_next.connect_clicked(|_| crate::telemetry::send_mpris_command("Next"));
     media_box.append(&btn_next);
-    
+
     topbar.append(&media_box);
 
     // Now Playing Text in the top bar
@@ -189,18 +207,28 @@ fn build_ui(
 
     let btn_dac = gtk::Button::with_label("🔍 DAC Caps");
     btn_dac.add_css_class("btn-cyber");
+    let (dac_tx, dac_rx) = std::sync::mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     {
-        let parent = win.clone();
+        let button = btn_dac.clone();
         btn_dac.connect_clicked(move |_| {
-            let (rates, formats, dsd) = crate::dac::get_dac_capabilities();
-            show_dac_dialog(&parent, rates, formats, dsd);
+            button.set_sensitive(false);
+            let tx = dac_tx.clone();
+            std::thread::spawn(move || {
+                let result = crate::dac::get_dac_capabilities();
+                let _ = tx.send(result);
+            });
         });
     }
     topbar.append(&btn_dac);
 
     for (text, cls, cmd, args) in [
         ("⚙ EasyEffects", "btn-app-green", "easyeffects", vec![]),
-        ("🔊 Audio Settings", "btn-cyber", "kcmshell6", vec!["kcm_pulseaudio"]),
+        (
+            "🔊 Audio Settings",
+            "btn-cyber",
+            "kcmshell6",
+            vec!["kcm_pulseaudio"],
+        ),
         ("🔗 qpwgraph", "btn-cyber", "qpwgraph", vec![]),
     ] {
         let b = gtk::Button::with_label(text);
@@ -232,7 +260,11 @@ fn build_ui(
     let c_src_gesture = gtk::GestureClick::new();
     c_src_gesture.connect_pressed(|_, _, _, _| {
         // Try Feishin first, then High Tide (the spawn_bg checks PATH)
-        if std::process::Command::new("feishin").arg("--version").output().is_ok() {
+        if std::process::Command::new("feishin")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
             spawn_bg("feishin", &[]);
         } else {
             spawn_bg("high-tide", &[]);
@@ -240,7 +272,7 @@ fn build_ui(
     });
     c_src.add_controller(c_src_gesture);
 
-    c_src.append(&label("SOURCE FORMAT", "title-sm", false));
+    c_src.append(&label("PLAYBACK APPLICATION", "title-sm", false));
     let codec_lbl = label("FLAC", "val-purple", false);
     c_src.append(&codec_lbl);
     let codec_sub = label("Lossless Stream", "sub-purple", false);
@@ -254,7 +286,7 @@ fn build_ui(
     c2.append(&lat_lbl);
 
     let c3 = card(&cards, "card-gold");
-    c3.append(&label("SAMPLE RATE", "title-sm", false));
+    c3.append(&label("ACTIVE OUTPUT RATE", "title-sm", false));
     let rate_lbl = label("192.0 kHz", "val-gold", false);
     c3.append(&rate_lbl);
     c3.append(&label("Hi-Res", "sub-text", false));
@@ -283,7 +315,6 @@ fn build_ui(
     c5.append(&vu_area);
 
     root.append(&cards);
-
 
     // ---- Audit strip ----------------------------------------------------
     let audit_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -315,8 +346,6 @@ fn build_ui(
             show_history_dialog(&parent, &summary);
         });
     }
-    audit_bar.append(&btn_hist);
-
     let btn_wp = gtk::Button::with_label("WirePlumber Rule");
     btn_wp.add_css_class("btn-cyber");
 
@@ -344,7 +373,11 @@ fn build_ui(
         let tx = audit_tx.clone();
         std::thread::spawn(move || {
             let audit = crate::audit::build_audit(false);
-            let warns = audit.findings.iter().filter(|f| f.severity == "warn").count();
+            let warns = audit
+                .findings
+                .iter()
+                .filter(|f| f.severity == "warn")
+                .count();
             let text = if warns == 0 {
                 "Clean \u{2014} no blocking issues detected".to_string()
             } else {
@@ -443,30 +476,8 @@ fn build_ui(
     btn_reset.add_css_class("btn-cyber");
     right.append(&btn_reset);
 
-    let q_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    q_box.set_homogeneous(true);
-    for q in [64u32, 128, 256, 512, 1024] {
-        let b = gtk::Button::with_label(&format!("Q:{}", q));
-        b.add_css_class("btn-cyber");
-        b.connect_clicked(move |_| {
-            spawn_bg("pw-metadata", &["-n", "settings", "0", "clock.force-quantum", &q.to_string()]);
-        });
-        q_box.append(&b);
-    }
-    right.append(&q_box);
-
-    let r_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    r_box.set_homogeneous(true);
-    for rt in [44100u32, 48000, 96000, 192000] {
-        let txt = if rt == 44100 { "44.1k".to_string() } else { format!("{}k", rt / 1000) };
-        let b = gtk::Button::with_label(&txt);
-        b.add_css_class("btn-cyber");
-        b.connect_clicked(move |_| {
-            spawn_bg("pw-metadata", &["-n", "settings", "0", "clock.force-rate", &rt.to_string()]);
-        });
-        r_box.append(&b);
-    }
-    right.append(&r_box);
+    // Read-only monitor: do not change sample rates or buffer quanta.
+    right.append(&label("Playback clocks: read-only", "sub-text", false));
 
     body.append(&right);
     root.append(&body);
@@ -478,7 +489,11 @@ fn build_ui(
         "sub-text",
         true,
     ));
-    ftr.append(&label("S=Suspended  I=Idle  R=Running  E=Error", "sub-text", true));
+    ftr.append(&label(
+        "S=Suspended  I=Idle  R=Running  E=Error",
+        "sub-text",
+        true,
+    ));
     root.append(&ftr);
 
     win.set_child(Some(&root));
@@ -543,7 +558,6 @@ fn build_ui(
         });
     }
 
-
     {
         let a = anim.clone();
         gauge_area.set_draw_func(move |_, cr, w, h| {
@@ -597,58 +611,106 @@ fn build_ui(
         let updating_combo = updating_combo.clone();
         let err_baseline = err_baseline.clone();
         let tray_handle_clone = tray_handle.clone();
+        let updating_volume = updating_volume.clone();
         glib::timeout_add_local(Duration::from_millis(100), move || {
             while let Ok(snap) = rx.try_recv() {
                 render(&ui, &anim, &updating_combo, &err_baseline, &snap);
-                
-                // Sync volume slider if changed externally (e.g. keyboard keys)
+
+                // wpctl has already run in the telemetry worker, never here.
                 if !vol_slider.is_focus() {
-                    let current_vol = crate::volume::get_volume();
-                    if (vol_slider.value() - current_vol).abs() > 0.01 {
-                        vol_slider.set_value(current_vol);
+                    if let Some(current_vol) = snap.volume {
+                        if (vol_slider.value() - current_vol).abs() > 0.01 {
+                            updating_volume.set(true);
+                            vol_slider.set_value(current_vol.clamp(0.0, 1.0));
+                            updating_volume.set(false);
+                        }
                     }
                 }
-                
+
                 if let Some(ref th) = tray_handle_clone {
-                    let is_playing = snap.stream.sr.is_some() || snap.stream.codec.is_some();
-                    let has_dsp = !snap.processing.is_empty();
-                    
-                    let (is_bitperfect, status_label) = if !is_playing {
-                        (false, "STANDBY".to_string())
-                    } else if has_dsp {
-                        (false, "DSP ACTIVE".to_string())
-                    } else if let (Some(s), Some(d)) = (snap.stream.sr, snap.driver_rate) {
-                        if s == d {
-                            (true, "BIT-PERFECT".to_string())
-                        } else {
-                            (false, format!("RESAMPLED ({}k➔{}k)", s / 1000, d / 1000))
-                        }
-                    } else {
-                        // No DSP, playing, but source rate unknown. Trust the Matrix.
-                        (true, "BIT-PERFECT".to_string())
+                    let is_playing = snap.stream.sr.is_some()
+                        || snap.stream.codec.is_some()
+                        || snap.stream.app.is_some();
+                    let mut detected_processing = snap.processing.clone();
+                    if let Some(ref source) = snap.stream.source_processing {
+                        detected_processing.push(source.clone());
+                    }
+                    let has_dsp = !detected_processing.is_empty();
+                    let observed_pcm = snap.path.as_ref().and_then(|p| p.pcm.as_ref());
+                    // A cumulative pw-top error counter is not a new XRUN.
+                    // The exact same graph/ALSA assessment drives CLI, GUI and tray.
+                    let (health, status_label) = match snap.path.as_ref().map(|p| p.status) {
+                        Some("idle") => (crate::tray::TrayHealth::Idle, "STANDBY".into()),
+                        Some("clear") => (
+                            crate::tray::TrayHealth::RateMatch,
+                            "PCM PATH CLEAR (SAMPLES UNVERIFIED)".into(),
+                        ),
+                        Some("altered") => (
+                            crate::tray::TrayHealth::Warning,
+                            snap.path.as_ref().unwrap().explanation.clone(),
+                        ),
+                        _ => (crate::tray::TrayHealth::Unknown, "UNVERIFIED".into()),
                     };
 
-                    let app_name = snap.stream.app.clone().unwrap_or_else(|| "Idle".to_string());
-                    let codec = snap.stream.codec.clone().unwrap_or_else(|| "---".to_string());
-                    
-                    let stream_info = if let Some(sr) = snap.stream.sr {
-                        format!("{} @ {:.1} kHz", codec, sr as f64 / 1000.0)
-                    } else { codec };
-                    
-                    let hw_info = if let (Some(hw), Some(dr)) = (snap.hw.first(), snap.driver_rate) {
-                        format!("{} @ {:.1} kHz", hw.format, dr as f64 / 1000.0)
-                    } else { "---".to_string() };
-                    
-                    let dsp_info = if has_dsp { snap.processing.join(", ") } else { "None".to_string() };
+                    let app_name = snap.stream.app.clone().unwrap_or_else(|| "Unknown".into());
+                    let codec = snap
+                        .stream
+                        .codec
+                        .as_deref()
+                        .unwrap_or("Source codec not exposed");
+                    let stream_info = match (snap.stream.sr, snap.stream.bps) {
+                        (Some(rate), Some(bits)) => {
+                            format!("{} · {}-bit / {:.1} kHz", codec, bits, rate as f64 / 1000.0)
+                        }
+                        (Some(rate), None) => {
+                            format!("{} · {:.1} kHz", codec, rate as f64 / 1000.0)
+                        }
+                        _ => observed_pcm
+                            .as_ref()
+                            .map(|p| {
+                                format!(
+                                    "{} | decoded PCM {} @ {:.1} kHz",
+                                    codec,
+                                    p.format,
+                                    p.rate as f64 / 1000.0
+                                )
+                            })
+                            .unwrap_or_else(|| codec.to_string()),
+                    };
+                    let pipewire_info = match (snap.driver_rate, snap.driver_quantum) {
+                        (Some(rate), Some(q)) => {
+                            format!("{:.1} kHz · Q{}", rate as f64 / 1000.0, q)
+                        }
+                        (Some(rate), None) => {
+                            format!("{:.1} kHz · quantum unknown", rate as f64 / 1000.0)
+                        }
+                        (None, Some(q)) => format!("rate unknown · Q{}", q),
+                        _ => "Unknown".into(),
+                    };
+                    let hw_info = snap
+                        .hw
+                        .first()
+                        .map(|hw| format!("{} @ {:.1} kHz", hw.format, hw.rate as f64 / 1000.0))
+                        .unwrap_or_else(|| "No open playback PCM".into());
+                    let dsp_info = if has_dsp {
+                        detected_processing.join(", ")
+                    } else if snap.stream.source_processing_checked {
+                        "High Tide gain reported clean; other processing unverified".into()
+                    } else {
+                        "No PipeWire DSP detected; source gain unknown".into()
+                    };
+                    let xrun_info = snap.total_err.to_string();
 
-                    let _ = th.update(|t| {
+                    let _ = th.update(move |t| {
                         t.status_label = status_label;
-                        t.is_bitperfect = is_bitperfect;
+                        t.health = health;
                         t.is_playing = is_playing;
                         t.app_name = app_name;
                         t.stream_info = stream_info;
                         t.hw_info = hw_info;
                         t.dsp_info = dsp_info;
+                        t.pipewire_info = pipewire_info;
+                        t.xrun_info = xrun_info;
                     });
                 }
             }
@@ -698,12 +760,16 @@ fn build_ui(
     });
     win.present();
 
-    // Handle System Tray Clicks (Show Window)
+    // Tray click / Show-Hide menu actually toggles the window.
     if let Some(rx) = tray_rx {
         let win_clone = win.clone();
         glib::timeout_add_local(Duration::from_millis(200), move || {
-            while let Ok(_) = rx.try_recv() {
-                win_clone.present();
+            while rx.try_recv().is_ok() {
+                if win_clone.is_visible() {
+                    win_clone.set_visible(false);
+                } else {
+                    win_clone.present();
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -719,55 +785,79 @@ fn build_ui(
             glib::ControlFlow::Continue
         });
     }
+
+    // Only create GTK dialogs on the main thread, after DAC work finishes.
+    {
+        let parent = win.clone();
+        glib::timeout_add_local(Duration::from_millis(100), move || {
+            while let Ok((rates, formats, dsd)) = dac_rx.try_recv() {
+                btn_dac.set_sensitive(true);
+                show_dac_dialog(&parent, rates, formats, dsd);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 }
 
 fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
     std::thread::spawn(move || {
         let mut tick: u64 = 0;
         let mut last_rows: Vec<NodeRow> = Vec::new();
-        let mut last_rate: Option<u32> = None;
-        let mut last_quant: Option<u32> = None;
         let mut last_err: u64 = 0;
+        let mut graph = telemetry::PwGraph::default();
+        let mut stream = StreamInfo::default();
+        let mut volume = None;
 
         loop {
             // pw-top is expensive (~200 ms). Refresh every 4th tick ≈ 2 s.
             if tick % 4 == 0 {
-                let (rows, r, q, e) = pwtop::parse_pw_top();
-                
+                let (rows, _, _, e) = pwtop::parse_pw_top();
+
                 // Log new XRUNs to SQLite
                 if e > last_err {
                     let new_xruns = e - last_err;
                     crate::history::log_xruns(new_xruns);
                 }
-                
+
                 last_rows = rows;
-                last_rate = r;
-                last_quant = q;
                 last_err = e;
             }
 
+            // The hardware format remains fresh on each snapshot. Expensive
+            // process-based graph/metadata reads are cached between polls.
             let hw = read_alsa_hw_params();
-            let graph = telemetry::PwGraph::load();
-            let stream = telemetry::mpd_query()
-                .or_else(telemetry::mpris_query)
-                .or_else(|| graph.primary_stream());
+            if tick % 4 == 0 {
+                graph = telemetry::PwGraph::load();
+            }
+            if tick % 2 == 0 {
+                stream = telemetry::detect_active_stream(&graph).unwrap_or_default();
+                volume = crate::volume::try_get_volume();
+            }
 
             let processing = graph.processing.clone();
 
-            let wait_us = last_rows.iter()
+            let wait_us = last_rows
+                .iter()
                 .find(|r| r.status == 'R' && r.wait_us.is_some())
                 .and_then(|r| r.wait_us);
 
+            // Keep output observations separate from arbitrary pw-top nodes.
+            // Evaluate before `hw` is moved into the snapshot.
+            let (node_rate, node_quantum) = telemetry::observed_output_clock(&last_rows);
+            let active_rate = graph.hardware_for_route(&hw).map(|h| h.rate).or(node_rate);
+            let path = graph.assess_pcm_path(&last_rows, &hw, &stream);
             let snap = Snapshot {
                 rows: last_rows.clone(),
                 sinks: graph.sinks.clone(),
-                stream: stream.unwrap_or_default(),
+                stream: stream.clone(),
+                path: Some(path),
                 processing,
                 hw,
-                driver_rate: last_rate.or(graph.driver_rate),
-                driver_quantum: last_quant.or(graph.driver_quantum),
+                driver_rate: active_rate,
+                driver_quantum: node_quantum,
                 total_err: last_err,
                 wait_us,
+                volume,
             };
 
             if tx.send(snap).is_err() {
@@ -786,13 +876,8 @@ fn render(
     err_baseline: &Cell<u64>,
     snap: &Snapshot,
 ) {
-    // Node table
+    // Reuse existing GTK labels instead of removing/recreating every row.
     let mut child = ui.node_box.first_child();
-    while let Some(c) = child {
-        let next = c.next_sibling();
-        ui.node_box.remove(&c);
-        child = next;
-    }
     for row in &snap.rows {
         let prefix = if row.status == 'R' { "▸ " } else { "  " };
         let status = match row.status {
@@ -803,8 +888,16 @@ fn render(
         let text = format!(
             "{:<40} {:>4} {:>8} {:>6} {:>7} {:>7} {:>7} {:>6.1} {:>6.1} {:>4}  {}",
             format!("{}{}", prefix, row.name),
-            row.id, status, row.quant, row.rate, row.wait, row.busy,
-            row.wq, row.bq, row.err, row.fmt
+            row.id,
+            status,
+            row.quant,
+            row.rate,
+            row.wait,
+            row.busy,
+            row.wq,
+            row.bq,
+            row.err,
+            row.fmt
         );
         let css = if row.err > 0 {
             "row-warn"
@@ -813,7 +906,33 @@ fn render(
         } else {
             "row-idle"
         };
-        ui.node_box.append(&label(&text, css, false));
+        if let Some(widget) = child.take() {
+            child = widget.next_sibling();
+            match widget.downcast::<gtk::Label>() {
+                Ok(existing) => {
+                    if existing.text().as_str() != text {
+                        existing.set_text(&text);
+                    }
+                    if !existing.has_css_class(css) {
+                        for class in ["row-warn", "row-run", "row-idle"] {
+                            existing.remove_css_class(class);
+                        }
+                        existing.add_css_class(css);
+                    }
+                }
+                Err(other) => {
+                    ui.node_box.remove(&other);
+                    ui.node_box.append(&label(&text, css, false));
+                }
+            }
+        } else {
+            ui.node_box.append(&label(&text, css, false));
+        }
+    }
+    // Remove only leftover rows when the node count shrinks.
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        ui.node_box.remove(&widget);
     }
 
     // Sink combo — only rebuild when the set of sinks changed
@@ -841,17 +960,55 @@ fn render(
         ui.combo.set_active_id(Some("default"));
     }
 
-    // Cards
-    let codec = snap.stream.codec.as_deref().unwrap_or("IDLE");
-    ui.codec_lbl.set_text(codec);
+    // Show the actual audio-producing app, even if source codec is unknown.
+    // Codec and bit depth remain visible separately when reliably available.
+    let app_name = snap.stream.app.as_deref().filter(|s| !s.is_empty());
+    let codec = snap.stream.codec.as_deref();
+    ui.codec_lbl.set_text(app_name.or(codec).unwrap_or("IDLE"));
 
-    let app = snap.stream.app.as_deref().unwrap_or("PipeWire");
-    let sub = if let (Some(bps), Some(sr)) = (snap.stream.bps, snap.stream.sr) {
-        format!("{}-bit / {:.1}kHz", bps, sr as f64 / 1000.0)
-    } else if let Some(br) = &snap.stream.br {
-        format!("{} • {}", br, app)
+    let app = app_name.unwrap_or("Unknown application");
+    let codec_name = codec.unwrap_or("Source codec not exposed");
+    // Display the source metadata and BOTH live transport formats.
+    // Do not let source codec availability hide the negotiated PCM details.
+    let source = match (snap.stream.bps, snap.stream.sr) {
+        (Some(bits), Some(rate)) => {
+            format!("{} {}-bit/{:.1}kHz", codec_name, bits, rate as f64 / 1000.0)
+        }
+        (None, Some(rate)) => format!("{} {:.1}kHz", codec_name, rate as f64 / 1000.0),
+        _ => codec_name.to_string(),
+    };
+    let stream_pcm = snap
+        .path
+        .as_ref()
+        .and_then(|p| p.pcm.as_ref())
+        .map(|p| {
+            format!(
+                "Stream {} {:.1}kHz {}ch",
+                p.format,
+                p.rate as f64 / 1000.0,
+                p.channels
+                    .map_or_else(|| "?".to_string(), |c| c.to_string())
+            )
+        })
+        .unwrap_or_else(|| "Stream PCM unknown".to_string());
+    let dac_pcm = snap
+        .hw
+        .first()
+        .filter(|_| snap.hw.len() == 1)
+        .map(|h| {
+            format!(
+                "DAC {} {:.1}kHz {}ch",
+                h.format,
+                h.rate as f64 / 1000.0,
+                h.channels
+                    .map_or_else(|| "?".to_string(), |c| c.to_string())
+            )
+        })
+        .unwrap_or_else(|| "DAC PCM unknown".to_string());
+    let sub = if app_name.is_some() {
+        format!("{} | {} → {}", source, stream_pcm, dac_pcm)
     } else {
-        format!("via {}", app)
+        "No active playback".to_string()
     };
     ui.codec_sub.set_text(&sub);
 
@@ -863,7 +1020,10 @@ fn render(
             .set_text(&format!("samples • {:.1}ms", q as f64 / r as f64 * 1000.0));
     }
     if let Some(r) = snap.driver_rate {
-        ui.rate_lbl.set_text(&format!("{:.1} kHz", r as f64 / 1000.0));
+        ui.rate_lbl
+            .set_text(&format!("{:.1} kHz", r as f64 / 1000.0));
+    } else {
+        ui.rate_lbl.set_text("—");
     }
 
     let delta = snap.total_err.saturating_sub(err_baseline.get());
@@ -886,7 +1046,6 @@ fn render(
     let track = snap.stream.track.as_deref().unwrap_or("Active Stream");
     ui.now_lbl.set_text(&format!("♫ [{}] {}", app, track));
 
-
     // Check for DSP notifications
     {
         let mut a = anim.borrow_mut();
@@ -906,12 +1065,12 @@ fn render(
 
     // Feed real telemetry into the animation state
     let max_wq = snap.rows.iter().map(|r| r.wq).fold(0.4f32, f32::max) as f64;
-    let playing = snap.stream.codec.is_some();
+    let playing = snap.stream.codec.is_some() || snap.stream.app.is_some();
     {
         let mut a = anim.borrow_mut();
         a.dsp_load = max_wq;
         a.playing = playing;
-        
+
         // Jitter graph: 0 to 1000us maps to 0-100 on Y axis
         if let Some(wait) = snap.wait_us {
             let norm = ((wait / 1000.0) * 100.0).clamp(0.0, 100.0);
@@ -921,14 +1080,35 @@ fn render(
 
         // Update Signal Matrix Data
         a.matrix_src_app = snap.stream.app.clone().unwrap_or_else(|| "System".into());
-        a.matrix_src_codec = snap.stream.codec.clone().unwrap_or_else(|| "Unknown".into());
-        a.matrix_dsp = if snap.processing.is_empty() {
-            "---".to_string()
+        a.matrix_src_codec = snap
+            .stream
+            .codec
+            .clone()
+            .unwrap_or_else(|| "Unknown".into());
+        let mut processing = snap.processing.clone();
+        if let Some(ref source) = snap.stream.source_processing {
+            processing.push(source.clone());
+        }
+        a.matrix_dsp = if !processing.is_empty() {
+            processing.join(", ")
+        } else if snap.stream.source_processing_checked {
+            "High Tide gain off / unity (reported)".to_string()
         } else {
-            snap.processing.join(", ")
+            "Source gain unknown; PipeWire DSP none".to_string()
         };
-        a.matrix_hw_fmt = snap.hw.first().map(|h| h.format.clone()).unwrap_or_else(|| "---".into());
+        a.matrix_hw_fmt = snap
+            .hw
+            .first()
+            .map(|h| h.format.clone())
+            .unwrap_or_else(|| "---".into());
+        // The DAC bus must show the hardware PCM rate, not the PipeWire graph rate.
         a.matrix_rate = snap.driver_rate.unwrap_or(0) as f64 / 1000.0;
+        a.alsa_bitperfect = snap.path.as_ref().is_some_and(|p| p.status == "clear");
+        a.alsa_reason = snap
+            .path
+            .as_ref()
+            .map(|p| p.explanation.clone())
+            .unwrap_or_else(|| "No verified playback path".into());
     }
 }
 
@@ -975,7 +1155,11 @@ fn show_ramp_result_dialog(parent: &gtk::ApplicationWindow, result: &serde_json:
     box_.append(&label(badge_text, badge_css, false));
     box_.append(&label(&detail, "sub-text", false));
     if let Some(wav) = result["wav"].as_str() {
-        box_.append(&label(&format!("Reference WAV: {}", wav), "sub-text", false));
+        box_.append(&label(
+            &format!("Reference WAV: {}", wav),
+            "sub-text",
+            false,
+        ));
     }
 
     let close = gtk::Button::with_label("Close");
@@ -989,7 +1173,11 @@ fn show_ramp_result_dialog(parent: &gtk::ApplicationWindow, result: &serde_json:
     dialog.present();
 }
 
-fn show_wireplumber_dialog(parent: &gtk::ApplicationWindow, rate: Option<u32>, quantum: Option<u32>) {
+fn show_wireplumber_dialog(
+    parent: &gtk::ApplicationWindow,
+    rate: Option<u32>,
+    quantum: Option<u32>,
+) {
     let rule = crate::wireplumber::generate_rule("alsa_output.*", rate, quantum);
 
     let dialog = gtk::Window::builder()
@@ -1047,8 +1235,10 @@ fn show_network_dialog(parent: &gtk::ApplicationWindow, devices: Vec<String>) {
         .build();
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    box_.set_margin_top(16); box_.set_margin_bottom(16);
-    box_.set_margin_start(16); box_.set_margin_end(16);
+    box_.set_margin_top(16);
+    box_.set_margin_bottom(16);
+    box_.set_margin_start(16);
+    box_.set_margin_end(16);
 
     let title = gtk::Label::new(Some("Discovered Media Renderers:"));
     title.set_xalign(0.0);
@@ -1057,12 +1247,14 @@ fn show_network_dialog(parent: &gtk::ApplicationWindow, devices: Vec<String>) {
 
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_vexpand(true);
-    
+
     let list_box = gtk::ListBox::new();
     list_box.set_selection_mode(gtk::SelectionMode::None);
-    
+
     if devices.is_empty() {
-        let lbl = gtk::Label::new(Some("No devices found. Ensure your streamer is on the same subnet."));
+        let lbl = gtk::Label::new(Some(
+            "No devices found. Ensure your streamer is on the same subnet.",
+        ));
         lbl.set_wrap(true);
         lbl.add_css_class("sub-text");
         list_box.append(&lbl);
@@ -1076,7 +1268,7 @@ fn show_network_dialog(parent: &gtk::ApplicationWindow, devices: Vec<String>) {
             list_box.append(&row);
         }
     }
-    
+
     scroll.set_child(Some(&list_box));
     box_.append(&scroll);
 
@@ -1101,8 +1293,10 @@ fn show_history_dialog(parent: &gtk::ApplicationWindow, summary: &str) {
         .build();
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    box_.set_margin_top(12); box_.set_margin_bottom(12);
-    box_.set_margin_start(12); box_.set_margin_end(12);
+    box_.set_margin_top(12);
+    box_.set_margin_bottom(12);
+    box_.set_margin_start(12);
+    box_.set_margin_end(12);
 
     let text_view = gtk::TextView::new();
     text_view.buffer().set_text(summary);
@@ -1125,7 +1319,12 @@ fn show_history_dialog(parent: &gtk::ApplicationWindow, summary: &str) {
     dialog.present();
 }
 
-fn show_dac_dialog(parent: &gtk::ApplicationWindow, rates: Vec<String>, formats: Vec<String>, dsd: Vec<String>) {
+fn show_dac_dialog(
+    parent: &gtk::ApplicationWindow,
+    rates: Vec<String>,
+    formats: Vec<String>,
+    dsd: Vec<String>,
+) {
     let dialog = gtk::Window::builder()
         .title("DAC Hardware Capabilities")
         .default_width(500)
@@ -1135,15 +1334,21 @@ fn show_dac_dialog(parent: &gtk::ApplicationWindow, rates: Vec<String>, formats:
         .build();
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    box_.set_margin_top(20); box_.set_margin_bottom(20);
-    box_.set_margin_start(20); box_.set_margin_end(20);
+    box_.set_margin_top(20);
+    box_.set_margin_bottom(20);
+    box_.set_margin_start(20);
+    box_.set_margin_end(20);
 
     let lbl_rate = gtk::Label::new(Some("Supported Sample Rates:"));
     lbl_rate.set_xalign(0.0);
     lbl_rate.add_css_class("title-sm");
     box_.append(&lbl_rate);
 
-    let rate_str = if rates.is_empty() { "Not detected".to_string() } else { rates.join(", ") };
+    let rate_str = if rates.is_empty() {
+        "Not detected".to_string()
+    } else {
+        rates.join(", ")
+    };
     let rate_val = gtk::Label::new(Some(&rate_str));
     rate_val.set_xalign(0.0);
     rate_val.set_wrap(true);
@@ -1155,7 +1360,11 @@ fn show_dac_dialog(parent: &gtk::ApplicationWindow, rates: Vec<String>, formats:
     lbl_fmt.add_css_class("title-sm");
     box_.append(&lbl_fmt);
 
-    let fmt_str = if formats.is_empty() { "Not detected".to_string() } else { formats.join(", ") };
+    let fmt_str = if formats.is_empty() {
+        "Not detected".to_string()
+    } else {
+        formats.join(", ")
+    };
     let fmt_val = gtk::Label::new(Some(&fmt_str));
     fmt_val.set_xalign(0.0);
     fmt_val.set_wrap(true);

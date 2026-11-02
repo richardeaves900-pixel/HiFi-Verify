@@ -23,7 +23,9 @@ pub fn init_db() -> Result<Connection> {
 }
 
 pub fn log_xruns(count: u64) {
-    if count == 0 { return; }
+    if count == 0 {
+        return;
+    }
     if let Ok(conn) = init_db() {
         let _ = conn.execute("INSERT INTO xruns (count) VALUES (?1)", [count as i64]);
     }
@@ -33,10 +35,14 @@ pub fn get_history_summary() -> String {
     let mut summary = String::new();
     match init_db() {
         Ok(conn) => {
-            let mut stmt = conn.prepare("SELECT timestamp, count FROM xruns ORDER BY timestamp DESC LIMIT 50").unwrap();
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            }).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT timestamp, count FROM xruns ORDER BY timestamp DESC LIMIT 50")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap();
 
             summary.push_str("--- XRUN History (Last 50) ---\n\n");
             let mut found = false;

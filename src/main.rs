@@ -1,17 +1,18 @@
 mod alsa_proc;
 mod audit;
+mod cava;
+mod dac;
+mod history;
 mod host;
 mod model;
+mod network;
+mod pcm_verify;
 mod pwtop;
 mod ramp;
 mod telemetry;
-mod cava;
-mod network;
-mod dac;
-mod volume;
-mod history;
 mod tray;
 mod ui;
+mod volume;
 mod wireplumber;
 
 use clap::Parser;
@@ -42,6 +43,14 @@ struct Args {
     /// View historical XRUN logs
     #[arg(long)]
     history: bool,
+
+    /// Trusted original PCM WAV used for an actual sample-identity check
+    #[arg(long, value_name = "WAV")]
+    verify_reference: Option<std::path::PathBuf>,
+
+    /// Captured PCM WAV from a known, user-selected digital monitor point
+    #[arg(long, value_name = "WAV")]
+    verify_capture: Option<std::path::PathBuf>,
 
     /// Run the ramp/null test
     #[arg(long, name = "ramp-test")]
@@ -84,7 +93,7 @@ fn main() -> std::process::ExitCode {
 
     if args.status {
         let a = audit::build_audit(true);
-        
+
         let mut state = "red";
         let mut reason = "Compromised";
 
@@ -93,7 +102,14 @@ fn main() -> std::process::ExitCode {
             reason = "Standby";
         } else if a.verdict.contains("POTENTIALLY BIT-PERFECT") {
             state = "green";
-            reason = "Bit-Perfect";
+            reason = "Rate match (unverified)";
+        } else if a.verdict.starts_with("UNVERIFIED") {
+            state = "amber";
+            reason = if a.verdict.contains("graph/source rate") {
+                "Graph/source rate discrepancy"
+            } else {
+                "Source sample rate unknown"
+            };
         } else {
             // If it's not bit-perfect, figure out why for the tooltip
             if !a.processing.is_empty() {
@@ -102,7 +118,7 @@ fn main() -> std::process::ExitCode {
                 reason = "Resampling";
             }
         }
-        
+
         // Output strict JSON
         println!("{{\"state\": \"{}\", \"reason\": \"{}\"}}", state, reason);
         return std::process::ExitCode::SUCCESS;
@@ -119,7 +135,11 @@ fn main() -> std::process::ExitCode {
             .driver_quantum
             .map(|q| format!("Q{}", q))
             .unwrap_or_else(|| "—".into());
-        let codec_str = a.stream_codec.clone().unwrap_or_else(|| "IDLE".into());
+        let codec_str = a
+            .stream_codec
+            .clone()
+            .or_else(|| a.stream_app.clone())
+            .unwrap_or_else(|| "IDLE".into());
         println!(
             "{} | {} | {} | {}",
             codec_str,
@@ -145,8 +165,29 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
+    if args.verify_reference.is_some() || args.verify_capture.is_some() {
+        match (&args.verify_reference, &args.verify_capture) {
+            (Some(reference), Some(capture)) => {
+                let result = pcm_verify::verify_wav(reference, capture);
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                return if result["status"] == "pass" {
+                    std::process::ExitCode::SUCCESS
+                } else {
+                    std::process::ExitCode::from(1)
+                };
+            }
+            _ => {
+                eprintln!("Provide BOTH --verify-reference and --verify-capture WAV files");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    }
+
     if args.ramp_test {
-        println!("{}", serde_json::to_string_pretty(&ramp::run(48000)).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ramp::run(48000)).unwrap()
+        );
         return std::process::ExitCode::SUCCESS;
     }
 
@@ -157,18 +198,21 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    if args.gui {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let tray = tray::HiFiTray::new(tx);
-        use ksni::blocking::TrayMethods;
-        let tray_handle = tray.spawn().expect("Failed to spawn system tray");
-        println!("--> System Tray registered on DBus.");
-
-        ui::run(Some(rx), Some(tray_handle));
-        return std::process::ExitCode::SUCCESS;
+    // --gui is retained as a compatible alias; every non-CLI launch now
+    // registers the KDE StatusNotifier tray instead of only --gui launches.
+    let _ = args.gui;
+    use ksni::blocking::TrayMethods;
+    let (tx, rx) = std::sync::mpsc::channel();
+    match tray::HiFiTray::new(tx).spawn() {
+        Ok(handle) => {
+            eprintln!("HiFi Verify: system tray registered");
+            ui::run(Some(rx), Some(handle));
+        }
+        Err(err) => {
+            // An unavailable D-Bus tray must not stop the desktop app.
+            eprintln!("HiFi Verify: tray unavailable ({err:?}); continuing without it");
+            ui::run(None, None);
+        }
     }
-
-    // No args: launch GUI by default
-    ui::run(None, None);
     std::process::ExitCode::SUCCESS
 }

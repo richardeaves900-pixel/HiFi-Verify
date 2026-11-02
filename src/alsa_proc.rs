@@ -22,7 +22,9 @@ fn parse_hw(path: &Path, text: &str) -> Option<HwParams> {
         ..Default::default()
     };
     for line in text.lines() {
-        let Some((k, v)) = line.split_once(':') else { continue };
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
         let key = k.trim().to_ascii_lowercase();
         let val = v.trim();
         match key.as_str() {
@@ -55,12 +57,19 @@ pub fn read_alsa_hw_params() -> Vec<HwParams> {
     let in_flatpak = std::path::Path::new("/.flatpak-info").exists();
 
     if in_flatpak {
-        if let Ok(o) = crate::host::host_cmd(&["find", "/proc/asound", "-name", "hw_params"], std::time::Duration::from_secs(2)) {
+        if let Ok(o) = crate::host::host_cmd(
+            &["find", "/proc/asound", "-name", "hw_params"],
+            std::time::Duration::from_secs(2),
+        ) {
             let text_out = String::from_utf8_lossy(&o.stdout);
             for path in text_out.lines() {
                 let path = path.trim();
-                if path.is_empty() { continue; }
-                if let Ok(cat) = crate::host::host_cmd(&["cat", path], std::time::Duration::from_secs(1)) {
+                if path.is_empty() {
+                    continue;
+                }
+                if let Ok(cat) =
+                    crate::host::host_cmd(&["cat", path], std::time::Duration::from_secs(1))
+                {
                     let content = String::from_utf8_lossy(&cat.stdout);
                     if let Some(hp) = parse_hw(Path::new(path), &content) {
                         out.push(hp);
@@ -79,20 +88,26 @@ pub fn read_alsa_hw_params() -> Vec<HwParams> {
         if !card_name.to_string_lossy().starts_with("card") {
             continue;
         }
-        let Ok(pcms) = fs::read_dir(card.path()) else { continue };
+        let Ok(pcms) = fs::read_dir(card.path()) else {
+            continue;
+        };
         for pcm in pcms.flatten() {
             let pcm_name = pcm.file_name();
             let name = pcm_name.to_string_lossy();
             if !name.starts_with("pcm") || !name.ends_with('p') {
                 continue;
             }
-            let Ok(subs) = fs::read_dir(pcm.path()) else { continue };
+            let Ok(subs) = fs::read_dir(pcm.path()) else {
+                continue;
+            };
             for sub in subs.flatten() {
                 if !sub.file_name().to_string_lossy().starts_with("sub") {
                     continue;
                 }
                 let hp_path = sub.path().join("hw_params");
-                let Ok(text) = fs::read_to_string(&hp_path) else { continue };
+                let Ok(text) = fs::read_to_string(&hp_path) else {
+                    continue;
+                };
                 if let Some(hp) = parse_hw(&hp_path, &text) {
                     out.push(hp);
                 }
@@ -104,7 +119,10 @@ pub fn read_alsa_hw_params() -> Vec<HwParams> {
 
 /// Compare the ALSA hardware params against the source sample rate.
 /// Returns (is_bitperfect, reason).
-pub fn check_alsa_bitperfect(hw_params: &[crate::model::HwParams], source_rate: Option<u32>) -> (bool, String) {
+pub fn check_alsa_bitperfect(
+    hw_params: &[crate::model::HwParams],
+    source_rate: Option<u32>,
+) -> (bool, String) {
     let Some(hw) = hw_params.first() else {
         return (false, "No ALSA hardware found".to_string());
     };
@@ -128,13 +146,19 @@ pub fn check_alsa_bitperfect(hw_params: &[crate::model::HwParams], source_rate: 
         if hw_bits > 24 {
             return (
                 true,
-                format!("ALSA Bit-Perfect (Rate {}Hz, Format {})", hw.rate, hw.format),
+                format!(
+                    "ALSA Bit-Perfect (Rate {}Hz, Format {})",
+                    hw.rate, hw.format
+                ),
             );
         }
     }
 
     (
         true,
-        format!("ALSA Bit-Perfect (Rate {}Hz, Format {})", hw.rate, hw.format),
+        format!(
+            "ALSA Bit-Perfect (Rate {}Hz, Format {})",
+            hw.rate, hw.format
+        ),
     )
 }

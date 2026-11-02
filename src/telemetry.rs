@@ -11,6 +11,10 @@ pub struct StreamInfo {
     pub sr: Option<u32>,
     pub bps: Option<u8>,
     pub br: Option<String>,
+    /// Source-side processing explicitly reported by the player.
+    pub source_processing: Option<String>,
+    /// True only when the player reported both normalisation and *raw* gain.
+    pub source_processing_checked: bool,
     pub mpd: bool,
 }
 
@@ -30,6 +34,589 @@ pub struct PwGraph {
     pub processing: Vec<String>,
     pub driver_rate: Option<u32>,
     pub driver_quantum: Option<u32>,
+    /// Unique direct playback routes observed in the live PipeWire graph.
+    pub playback_routes: Vec<PlaybackRoute>,
+}
+
+// Recognise stable Flatpak identities before generic Python process names.
+// Do not infer a codec or a TIDAL source sample rate from an application ID.
+fn known_application_id(props: &serde_json::Value) -> Option<&'static str> {
+    ["pipewire.access.portal.app_id", "application.id"]
+        .iter()
+        .filter_map(|key| props.get(*key).and_then(|v| v.as_str()))
+        .find_map(|id| match id.to_ascii_lowercase().as_str() {
+            "io.github.nokse22.high-tide" | "io.github.nokse22.hightide" => Some("High Tide"),
+            _ => None,
+        })
+}
+
+fn uninformative_app_name(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    name.is_empty()
+        || name == "unknown"
+        || name == "unknown application"
+        || name == "python"
+        || name.starts_with("python3")
+}
+
+fn resolve_playback_app(
+    node_props: &serde_json::Value,
+    client_props: Option<&serde_json::Value>,
+    pid: Option<i32>,
+) -> String {
+    let node_app = playback_app_name(node_props, pid);
+    if !uninformative_app_name(&node_app) {
+        return node_app;
+    }
+    if let Some(props) = client_props {
+        let client_app = playback_app_name(props, None);
+        if !uninformative_app_name(&client_app) {
+            return client_app;
+        }
+    }
+    node_app
+}
+
+// Identify the *producer* of a running playback stream. The /proc comm field
+// is a last resort: Firefox subprocess names may describe a content process
+// rather than the Firefox application, and sandboxed PIDs may be inaccessible.
+fn playback_app_name(props: &serde_json::Value, pid: Option<i32>) -> String {
+    if let Some(known) = known_application_id(props) {
+        return known.to_string();
+    }
+    let name = [
+        "application.name",
+        "application.process.binary",
+        "client.name",
+    ]
+    .iter()
+    .filter_map(|key| props.get(*key).and_then(|v| v.as_str()))
+    .map(str::trim)
+    .find(|s| {
+        !s.is_empty()
+            && !matches!(
+                s.to_ascii_lowercase().as_str(),
+                "pipewire" | "pipewire-pulse" | "unknown"
+            )
+    })
+    .map(str::to_owned)
+    .or_else(|| {
+        pid.and_then(|p| std::fs::read_to_string(format!("/proc/{p}/comm")).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+    .unwrap_or_else(|| "Unknown application".to_string());
+
+    match name.to_ascii_lowercase().as_str() {
+        "firefox" | "mozilla firefox" | "firefox-bin" => "Firefox".to_string(),
+        _ => name,
+    }
+}
+
+fn is_playback_candidate(n: &StreamNode) -> bool {
+    let id = format!("{} {}", n.app_name, n.node_name).to_ascii_lowercase();
+    !["easyeffects", "ee_", "filter-chain", "cava", "hifi-verify"]
+        .iter()
+        .any(|term| id.contains(term))
+}
+
+/// A measured running ALSA output clock, never an arbitrary pw-top node.
+/// When several outputs are active, do not attribute one without a route.
+pub fn observed_output_clock(rows: &[crate::pwtop::NodeRow]) -> (Option<u32>, Option<u32>) {
+    let mut outputs = rows
+        .iter()
+        .filter(|r| r.status == 'R' && r.name.starts_with("alsa_output."));
+    let Some(output) = outputs.next() else {
+        return (None, None);
+    };
+    if outputs.next().is_some() {
+        return (None, None);
+    }
+    (
+        output.rate.parse::<u32>().ok().filter(|n| *n > 0),
+        output.quant.parse::<u32>().ok().filter(|n| *n > 0),
+    )
+}
+
+#[cfg(test)]
+mod observer_output_tests {
+    use super::*;
+    fn node(name: &str, status: char, rate: &str) -> crate::pwtop::NodeRow {
+        crate::pwtop::NodeRow {
+            wait_us: None,
+            status,
+            id: "1".into(),
+            quant: "512".into(),
+            rate: rate.into(),
+            wait: "0".into(),
+            busy: "0".into(),
+            wq: 0.0,
+            bq: 0.0,
+            err: 0,
+            fmt: "-".into(),
+            name: name.into(),
+        }
+    }
+    #[test]
+    fn correct_dac_rate_overrides_unrelated_48k_stream() {
+        let rows = [
+            node("alsa_output.usb-FiiO", 'R', "96000"),
+            node("python3.13", 'R', "48000"),
+        ];
+        assert_eq!(observed_output_clock(&rows).0, Some(96000));
+    }
+    #[test]
+    fn multiple_outputs_are_not_misattributed() {
+        let rows = [
+            node("alsa_output.usb-FiiO", 'R', "96000"),
+            node("alsa_output.pci-HDMI", 'R', "48000"),
+        ];
+        assert_eq!(observed_output_clock(&rows), (None, None));
+    }
+    #[test]
+    fn idle_output_is_not_reported_as_live() {
+        assert_eq!(
+            observed_output_clock(&[node("alsa_output.usb-FiiO", 'I', "96000")]),
+            (None, None)
+        );
+    }
+}
+
+/// Decoded *PipeWire* playback PCM, not a claim about the source file's codec.
+/// Ambiguous concurrent producers are not guessed or combined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackPcm {
+    pub format: String,
+    pub rate: u32,
+    pub channels: Option<u32>,
+}
+
+pub fn observed_playback_pcm(rows: &[crate::pwtop::NodeRow]) -> Option<PlaybackPcm> {
+    let mut candidates = rows.iter().filter_map(|r| {
+        if r.status != 'R'
+            || r.name.starts_with("alsa_output.")
+            || r.name.starts_with("alsa_input.")
+        {
+            return None;
+        }
+        let name = r.name.to_ascii_lowercase();
+        if [
+            "cava",
+            "easyeffects",
+            "ee_",
+            "filter-chain",
+            "monitor",
+            "hifi-verify",
+            "dummy-driver",
+            "freewheel-driver",
+        ]
+        .iter()
+        .any(|part| name.contains(part))
+        {
+            return None;
+        }
+        // pw-top already exposes the actual negotiated decoded PCM format.
+        let format = r.fmt.split_whitespace().next()?.to_string();
+        if !(format.starts_with('S') || format.starts_with('F')) {
+            return None;
+        }
+        let rate: u32 = r.rate.parse().ok()?;
+        if !(8000..=768000).contains(&rate) {
+            return None;
+        }
+        let channels = r
+            .fmt
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.strip_suffix('c'))
+            .and_then(|s| s.parse().ok());
+        Some(PlaybackPcm {
+            format,
+            rate,
+            channels,
+        })
+    });
+    let first = candidates.next()?;
+    if candidates.next().is_some() {
+        None
+    } else {
+        Some(first)
+    }
+}
+
+#[cfg(test)]
+mod playback_pcm_observer_tests {
+    use super::*;
+    fn row(name: &str, fmt: &str, rate: &str) -> crate::pwtop::NodeRow {
+        crate::pwtop::NodeRow {
+            wait_us: None,
+            status: 'R',
+            id: "1".into(),
+            quant: "512".into(),
+            rate: rate.into(),
+            wait: "0".into(),
+            busy: "0".into(),
+            wq: 0.0,
+            bq: 0.0,
+            err: 0,
+            fmt: fmt.into(),
+            name: name.into(),
+        }
+    }
+    #[test]
+    fn high_tide_pcm_is_measured_without_modified_player() {
+        let rows = [
+            row("alsa_output.usb-FiiO", "S32LE 2c", "96000"),
+            row("python3.13", "S24LE 2c", "96000"),
+            row("cava", "S16LE 2c", "48000"),
+        ];
+        assert_eq!(
+            observed_playback_pcm(&rows),
+            Some(PlaybackPcm {
+                format: "S24LE".into(),
+                rate: 96000,
+                channels: Some(2)
+            })
+        );
+    }
+    #[test]
+    fn concurrent_audio_producers_are_ambiguous() {
+        let rows = [
+            row("python3.13", "S24LE 2c", "96000"),
+            row("firefox", "F32LE 2c", "48000"),
+        ];
+        assert_eq!(observed_playback_pcm(&rows), None);
+    }
+    #[test]
+    fn output_is_not_mistaken_for_source_stream() {
+        assert_eq!(
+            observed_playback_pcm(&[row("alsa_output.usb-FiiO", "S32LE 2c", "96000")]),
+            None
+        );
+    }
+}
+
+/// One stereo playback route appears as two Port links; the node pair is
+/// deduplicated before making a verdict. Monitoring/visualiser connections are
+/// not playback routes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackRoute {
+    pub stream_id: u64,
+    pub sink_id: u64,
+    pub sink_name: String,
+    pub alsa_card: Option<u32>,
+}
+
+fn json_id(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64().or_else(|| v.as_str()?.parse::<u64>().ok())
+}
+
+fn playback_routes_from_dump(objects: &[serde_json::Value]) -> Vec<PlaybackRoute> {
+    use std::collections::HashMap;
+    let nodes: HashMap<u64, &serde_json::Value> = objects
+        .iter()
+        .filter(|o| {
+            o.get("type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.ends_with(":Node"))
+        })
+        .filter_map(|o| Some((json_id(o.get("id")?)?, o)))
+        .collect();
+    let mut routes = Vec::new();
+    for link in objects.iter().filter(|o| {
+        o.get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.ends_with(":Link"))
+    }) {
+        let Some(info) = link.get("info") else {
+            continue;
+        };
+        if info.get("state").and_then(|v| v.as_str()) != Some("active") {
+            continue;
+        }
+        let Some(source_id) = info.get("output-node-id").and_then(json_id) else {
+            continue;
+        };
+        let Some(sink_id) = info.get("input-node-id").and_then(json_id) else {
+            continue;
+        };
+        let Some(source) = nodes.get(&source_id) else {
+            continue;
+        };
+        let Some(sink) = nodes.get(&sink_id) else {
+            continue;
+        };
+        let src_props = &source["info"]["props"];
+        let sink_props = &sink["info"]["props"];
+        if src_props["media.class"].as_str() != Some("Stream/Output/Audio")
+            || sink_props["media.class"].as_str() != Some("Audio/Sink")
+            || source["info"]["state"].as_str() != Some("running")
+        {
+            continue;
+        }
+        let Some(sink_name) = sink_props["node.name"].as_str() else {
+            continue;
+        };
+        if !sink_name.starts_with("alsa_output.") {
+            continue;
+        }
+        let card = ["api.alsa.card", "api.alsa.pcm.card", "alsa.card"]
+            .iter()
+            .find_map(|key| sink_props.get(*key).and_then(json_id))
+            .and_then(|id| u32::try_from(id).ok());
+        let route = PlaybackRoute {
+            stream_id: source_id,
+            sink_id,
+            sink_name: sink_name.to_string(),
+            alsa_card: card,
+        };
+        if !routes
+            .iter()
+            .any(|r: &PlaybackRoute| r.stream_id == source_id && r.sink_id == sink_id)
+        {
+            routes.push(route);
+        }
+    }
+    routes
+}
+
+/// The original codec is never inferred from the PCM transport. Green denotes
+/// a clean *observed* rate/format path, not identical decoded source samples.
+#[derive(Debug, Clone)]
+pub struct PcmPathAssessment {
+    pub status: &'static str, // idle | clear | altered | unknown
+    pub explanation: String,
+    pub pcm: Option<PlaybackPcm>,
+    pub output_rate: Option<u32>,
+    pub output_quantum: Option<u32>,
+}
+
+fn card_from_hw_path(path: &str) -> Option<u32> {
+    path.strip_prefix("/proc/asound/card")?
+        .split('/')
+        .next()?
+        .parse()
+        .ok()
+}
+
+impl PwGraph {
+    pub fn unique_playback_route(&self) -> Option<&PlaybackRoute> {
+        if self.playback_routes.len() == 1 {
+            self.playback_routes.first()
+        } else {
+            None
+        }
+    }
+
+    pub fn hardware_for_route<'a>(
+        &self,
+        hw: &'a [crate::model::HwParams],
+    ) -> Option<&'a crate::model::HwParams> {
+        let route = self.unique_playback_route()?;
+        if let Some(card) = route.alsa_card {
+            let mut matched = hw
+                .iter()
+                .filter(|h| card_from_hw_path(&h.path) == Some(card));
+            let first = matched.next()?;
+            if matched.next().is_none() {
+                Some(first)
+            } else {
+                None
+            }
+        } else if hw.len() == 1 {
+            hw.first()
+        } else {
+            None
+        }
+    }
+
+    pub fn pcm_for_route(&self, rows: &[crate::pwtop::NodeRow]) -> Option<PlaybackPcm> {
+        let route = self.unique_playback_route()?;
+        let node = rows
+            .iter()
+            .find(|r| r.status == 'R' && r.id.parse::<u64>().ok() == Some(route.stream_id))?;
+        let format = node.fmt.split_whitespace().next()?.to_string();
+        if !format.starts_with('S') && !format.starts_with('U') && !format.starts_with('F') {
+            return None;
+        }
+        let rate = node
+            .rate
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (8000..=768000).contains(n))?;
+        let channels = node
+            .fmt
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.strip_suffix('c'))
+            .and_then(|s| s.parse().ok());
+        Some(PlaybackPcm {
+            format,
+            rate,
+            channels,
+        })
+    }
+
+    pub fn assess_pcm_path(
+        &self,
+        rows: &[crate::pwtop::NodeRow],
+        hw: &[crate::model::HwParams],
+        stream: &StreamInfo,
+    ) -> PcmPathAssessment {
+        let pcm = self.pcm_for_route(rows);
+        let endpoint = self.hardware_for_route(hw);
+        let output_node = self.unique_playback_route().and_then(|route| {
+            rows.iter()
+                .find(|r| r.status == 'R' && r.id.parse::<u64>().ok() == Some(route.sink_id))
+        });
+        let output_rate = endpoint
+            .map(|h| h.rate)
+            .or_else(|| output_node.and_then(|r| r.rate.parse::<u32>().ok()));
+        let output_quantum = output_node.and_then(|r| r.quant.parse::<u32>().ok());
+        let (status, explanation) = if stream.app.is_none() {
+            ("idle", "No active playback".to_string())
+        } else if !self.processing.is_empty() || stream.source_processing.is_some() {
+            (
+                "altered",
+                "Processing reported on the audio path".to_string(),
+            )
+        } else if let (Some(p), Some(h)) = (pcm.as_ref(), endpoint) {
+            if p.rate != h.rate {
+                (
+                    "altered",
+                    format!(
+                        "RATE CONVERSION: {:.1} -> {:.1} kHz",
+                        p.rate as f64 / 1000.0,
+                        h.rate as f64 / 1000.0
+                    ),
+                )
+            } else if stream.sr.is_some_and(|src| src != p.rate) {
+                ("altered", "Source and decoded PCM rates differ".to_string())
+            } else if p.channels.is_some() && h.channels.is_some() && p.channels != h.channels {
+                (
+                    "altered",
+                    "Channel count changes between stream and DAC".to_string(),
+                )
+            } else if p.format.starts_with('F') || p.format.starts_with('U') {
+                (
+                    "unknown",
+                    "PCM sample conversion cannot be ruled out".to_string(),
+                )
+            } else if p.format.starts_with('S')
+                && p.format[1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<u8>()
+                    .ok()
+                    .zip(h.bits)
+                    .is_some_and(|(a, b)| a > b)
+            {
+                (
+                    "altered",
+                    "DAC format has fewer bits than stream PCM".to_string(),
+                )
+            } else {
+                (
+                    "clear",
+                    "PCM PATH CLEAR (SAMPLE IDENTITY UNVERIFIED)".to_string(),
+                )
+            }
+        } else {
+            (
+                "unknown",
+                "Playback route or negotiated PCM not measured".to_string(),
+            )
+        };
+        PcmPathAssessment {
+            status,
+            explanation,
+            pcm,
+            output_rate,
+            output_quantum,
+        }
+    }
+}
+
+#[cfg(test)]
+mod linked_path_tests {
+    use super::*;
+    fn graph_fixture() -> PwGraph {
+        let dump = serde_json::json!([
+            {"id":12,"type":"PipeWire:Interface:Node","info":{"state":"running","props":{"media.class":"Stream/Output/Audio","node.name":"python3.13"}}},
+            {"id":44,"type":"PipeWire:Interface:Node","info":{"state":"running","props":{"media.class":"Audio/Sink","node.name":"alsa_output.usb-Fiio","api.alsa.card":"3"}}},
+            {"id":52,"type":"PipeWire:Interface:Node","info":{"state":"running","props":{"media.class":"Stream/Input/Audio","node.name":"cava"}}},
+            {"id":13,"type":"PipeWire:Interface:Link","info":{"state":"active","output-node-id":12,"input-node-id":44}},
+            {"id":14,"type":"PipeWire:Interface:Link","info":{"state":"active","output-node-id":12,"input-node-id":44}},
+            {"id":15,"type":"PipeWire:Interface:Link","info":{"state":"active","output-node-id":44,"input-node-id":52}}
+        ]);
+        PwGraph {
+            playback_routes: playback_routes_from_dump(dump.as_array().unwrap()),
+            ..Default::default()
+        }
+    }
+    fn node(id: &str, format: &str, rate: &str, name: &str) -> crate::pwtop::NodeRow {
+        crate::pwtop::NodeRow {
+            wait_us: None,
+            status: 'R',
+            id: id.into(),
+            quant: "512".into(),
+            rate: rate.into(),
+            wait: "0".into(),
+            busy: "0".into(),
+            wq: 0.0,
+            bq: 0.0,
+            err: 0,
+            fmt: format.into(),
+            name: name.into(),
+        }
+    }
+    #[test]
+    fn direct_high_tide_route_ignores_cava_and_duplicate_channel_links() {
+        let graph = graph_fixture();
+        assert_eq!(graph.playback_routes.len(), 1);
+        let pcm = graph
+            .pcm_for_route(&[
+                node("12", "S24LE 2c", "96000", "python3.13"),
+                node("44", "S32LE 2c", "48000", "alsa_output.usb-Fiio"),
+                node("52", "S16LE 2c", "48000", "cava"),
+            ])
+            .unwrap();
+        assert_eq!(pcm.rate, 96000);
+        assert_eq!(pcm.format, "S24LE");
+    }
+    #[test]
+    fn mismatch_is_red_and_matching_widened_pcm_is_green() {
+        let g = graph_fixture();
+        let source = StreamInfo {
+            app: Some("High Tide".into()),
+            ..Default::default()
+        };
+        let mut hw = vec![crate::model::HwParams {
+            path: "/proc/asound/card3/pcm0p/sub0/hw_params".into(),
+            format: "S32_LE".into(),
+            rate: 48000,
+            channels: Some(2),
+            bits: Some(32),
+            ..Default::default()
+        }];
+        let input = [
+            node("12", "S24LE 2c", "96000", "python3.13"),
+            node("44", "S32LE 2c", "48000", "alsa_output.usb-Fiio"),
+        ];
+        assert_eq!(g.assess_pcm_path(&input, &hw, &source).status, "altered");
+        hw[0].rate = 96000;
+        assert_eq!(g.assess_pcm_path(&input, &hw, &source).status, "clear");
+    }
+    #[test]
+    fn missing_link_never_produces_false_green() {
+        let g = PwGraph::default();
+        let source = StreamInfo {
+            app: Some("High Tide".into()),
+            ..Default::default()
+        };
+        assert_eq!(g.assess_pcm_path(&[], &[], &source).status, "unknown");
+    }
 }
 
 impl PwGraph {
@@ -43,14 +630,36 @@ impl PwGraph {
         };
         let Some(arr) = v.as_array() else { return g };
 
+        // Playback nodes may lack app properties while their owning PipeWire
+        // Client still contains the Flatpak identity.
+        let client_props: std::collections::HashMap<u64, &serde_json::Value> = arr
+            .iter()
+            .filter(|obj| {
+                obj.get("type")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|ty| ty.ends_with(":Client"))
+            })
+            .filter_map(|obj| Some((obj.get("id")?.as_u64()?, obj.get("info")?.get("props")?)))
+            .collect();
+
         let hints = [
-            "easyeffects", "carla", "jamesdsp", "filter-chain",
-            "calf", "lsp-plugins", "compressor", "equalizer",
+            "easyeffects",
+            "carla",
+            "jamesdsp",
+            "filter-chain",
+            "calf",
+            "lsp-plugins",
+            "compressor",
+            "equalizer",
         ];
 
         for obj in arr {
-            let Some(info) = obj.get("info") else { continue };
-            let Some(props) = info.get("props") else { continue };
+            let Some(info) = obj.get("info") else {
+                continue;
+            };
+            let Some(props) = info.get("props") else {
+                continue;
+            };
             let media_class = props
                 .get("media.class")
                 .and_then(|x| x.as_str())
@@ -66,8 +675,7 @@ impl PwGraph {
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
 
-            if state == "running"
-                && (media_class == "Audio/Sink" || media_class == "Audio/Source")
+            if state == "running" && (media_class == "Audio/Sink" || media_class == "Audio/Source")
             {
                 let rate = props.get("audio.rate").and_then(|x| {
                     x.as_u64()
@@ -106,24 +714,18 @@ impl PwGraph {
             }
 
             if media_class.contains("Stream/Output/Audio") && state == "running" {
-                let pid = props
-                    .get("application.process.id")
-                    .and_then(|x| {
-                        x.as_u64()
-                            .map(|n| n as i32)
-                            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
-                    });
-                
-                let mut resolved_app = app.to_string();
-                if let Some(p) = pid {
-                    // Read the actual process name from the kernel
-                    if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", p)) {
-                        let c = comm.trim();
-                        if !c.is_empty() {
-                            resolved_app = c.to_string();
-                        }
-                    }
-                }
+                let pid = props.get("application.process.id").and_then(|x| {
+                    x.as_u64()
+                        .map(|n| n as i32)
+                        .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+                });
+
+                let client_id = props.get("client.id").and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                });
+                let owner = client_id.and_then(|id| client_props.get(&id).copied());
+                let resolved_app = resolve_playback_app(props, owner, pid);
 
                 g.streams.push(StreamNode {
                     app_name: resolved_app,
@@ -146,31 +748,20 @@ impl PwGraph {
                 });
             }
         }
+        g.playback_routes = playback_routes_from_dump(arr);
         g
     }
 
     pub fn primary_stream(&self) -> Option<StreamInfo> {
-        let first_valid = self.streams.iter().find(|n| {
-            let low = format!("{} {}", n.app_name, n.node_name).to_lowercase();
-            !low.contains("easyeffects") && !low.contains("ee_") && !low.contains("filter-chain")
-        }).or_else(|| self.streams.first());
+        // Visualisers and DSP helper nodes are not the audio-producing app.
+        let first_valid = self.streams.iter().find(|n| is_playback_candidate(n));
 
         first_valid.map(|n| {
-            let low = format!("{} {}", n.app_name, n.node_name).to_lowercase();
-            let inferred_codec = if low.contains("feishin") || low.contains("mpv") {
-                Some("FLAC / Stream".to_string())
-            } else if low.contains("high-tide") || low.contains("tidal") {
-                Some("FLAC (Tidal)".to_string())
-            } else if low.contains("chrom") || low.contains("firefox") || low.contains("brave") || low.contains("vivaldi") {
-                Some("Web (Opus/AAC)".to_string())
-            } else if low.contains("spotify") {
-                Some("Ogg Vorbis".to_string())
-            } else {
-                None
-            };
-            
+            // Names and stream producers do not establish the source codec.
+            // A real accessible media file may establish its container format.
+
             StreamInfo {
-                codec: n.pid.and_then(sniff_pid_files).or(inferred_codec),
+                codec: n.pid.and_then(sniff_pid_files),
                 track: Some(if n.media_name.is_empty() {
                     n.app_name.clone()
                 } else {
@@ -180,9 +771,106 @@ impl PwGraph {
                 sr: None,
                 bps: None,
                 br: None,
+                source_processing: None,
+                source_processing_checked: false,
                 mpd: false,
             }
         })
+    }
+}
+
+// A MPRIS media-player ID such as Instance_1_50086 is not an application
+// identity. PipeWire owns application attribution; MPRIS only enriches tracks.
+fn same_app(a: &str, b: &str) -> bool {
+    let key = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    !a.is_empty() && key(a) == key(b)
+}
+
+fn generic_player_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "player" || n == "unknown player" || n.starts_with("instance_")
+}
+
+// Pure selector, so both behaviour and failure modes can be unit-tested.
+fn select_stream(
+    graph: &PwGraph,
+    mpd: Option<StreamInfo>,
+    mpris: Option<StreamInfo>,
+) -> Option<StreamInfo> {
+    if let Some(mut live) = graph.primary_stream() {
+        // MPD reports genuine source format and depth, where available.
+        if live
+            .app
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("mpd"))
+        {
+            return mpd.or(Some(live));
+        }
+
+        if let Some(media) = mpris {
+            let player_name = media.app.as_deref().unwrap_or("");
+            let matches = live
+                .app
+                .as_deref()
+                .is_some_and(|app| same_app(app, player_name));
+            let only_producer = graph
+                .streams
+                .iter()
+                .filter(|n| is_playback_candidate(n))
+                .count()
+                == 1;
+            // A Flatpak can publish only "python3.13" as its client name.
+            // If precisely one audio stream is running and MPRIS reports a
+            // specific playing player, use that name for attribution only.
+            let mpris_identifies_unknown = only_producer
+                && !generic_player_name(player_name)
+                && !player_name.trim().is_empty()
+                && live.app.as_deref().is_none_or(uninformative_app_name);
+            if matches
+                || (only_producer && generic_player_name(player_name))
+                || mpris_identifies_unknown
+            {
+                if mpris_identifies_unknown {
+                    live.app = Some(player_name.to_string());
+                }
+                if let Some(track) = media
+                    .track
+                    .filter(|s| !s.is_empty() && !generic_player_name(s))
+                {
+                    live.track = Some(track);
+                }
+                live.codec = media.codec.or(live.codec);
+                live.sr = media.sr.or(live.sr);
+                live.bps = media.bps.or(live.bps);
+                live.br = media.br.or(live.br);
+                live.source_processing = media.source_processing.or(live.source_processing);
+                live.source_processing_checked |= media.source_processing_checked;
+            }
+        }
+        return Some(live);
+    }
+
+    // No PipeWire playback node seen: preserve the existing MPD/MPRIS fallback.
+    mpd.or(mpris)
+}
+
+pub fn detect_active_stream(graph: &PwGraph) -> Option<StreamInfo> {
+    match graph.primary_stream() {
+        Some(ref pw)
+            if pw
+                .app
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("mpd")) =>
+        {
+            select_stream(graph, mpd_query(), None)
+        }
+        Some(ref pw) => select_stream(graph, None, mpris_query_for(pw.app.as_deref())),
+        None => select_stream(graph, mpd_query(), mpris_query_for(None)),
     }
 }
 
@@ -205,11 +893,9 @@ pub fn flac_header(path: &str) -> Option<(u32, u8, u8)> {
 }
 
 pub fn mpd_query() -> Option<StreamInfo> {
-    let mut s = TcpStream::connect_timeout(
-        &"127.0.0.1:6600".parse().ok()?,
-        Duration::from_millis(250),
-    )
-    .ok()?;
+    let mut s =
+        TcpStream::connect_timeout(&"127.0.0.1:6600".parse().ok()?, Duration::from_millis(250))
+            .ok()?;
     s.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
     let mut greet = [0u8; 256];
     let _ = s.read(&mut greet);
@@ -273,6 +959,8 @@ pub fn mpd_query() -> Option<StreamInfo> {
             .get("bitrate")
             .filter(|b| *b != "0")
             .map(|b| format!("{} kbps", b)),
+        source_processing: None,
+        source_processing_checked: false,
         mpd: true,
     })
 }
@@ -309,8 +997,10 @@ fn friendly_app_name(bus_name: &str) -> String {
         .split('.')
         .filter(|p| {
             let lower = p.to_lowercase();
-            !matches!(lower.as_str(), "io" | "com" | "org" | "net" | "github" | "gitlab" | "instance")
-                && !lower.chars().all(|c| c.is_ascii_digit())
+            !matches!(
+                lower.as_str(),
+                "io" | "com" | "org" | "net" | "github" | "gitlab" | "instance"
+            ) && !lower.chars().all(|c| c.is_ascii_digit())
         })
         .last()
         .map(|s| {
@@ -323,7 +1013,34 @@ fn friendly_app_name(bus_name: &str) -> String {
         .unwrap_or_else(|| "Player".to_string())
 }
 
-pub fn mpris_query() -> Option<StreamInfo> {
+// The High Tide bridge publishes raw GStreamer playbin volume and the
+// normalization toggle. A missing key is UNKNOWN, not disabled. Even two
+// clean reports do not prove sample identity or unity gain downstream.
+fn high_tide_gain_report(
+    normalized: Option<bool>,
+    volume: Option<f64>,
+    raw_gain_bridge: bool,
+) -> (bool, Option<String>) {
+    let volume = volume.filter(|v| v.is_finite() && (0.0..=2.0).contains(v));
+    // The previous bridge rounded volume: a value of 1.0 could mean 0.96.
+    // Only bridge protocol v2 (raw playbin gain) can establish "reported clear".
+    let checked = raw_gain_bridge && normalized.is_some() && volume.is_some();
+    let mut reasons = Vec::new();
+    if normalized == Some(true) {
+        reasons.push("High Tide normalization/ReplayGain enabled".to_string());
+    }
+    if let Some(v) = volume {
+        if v != 1.0 {
+            reasons.push(format!(
+                "High Tide internal playback volume is {:.4} (unity = 1.0)",
+                v
+            ));
+        }
+    }
+    (checked, (!reasons.is_empty()).then(|| reasons.join("; ")))
+}
+
+pub fn mpris_query_for(preferred_app: Option<&str>) -> Option<StreamInfo> {
     let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE).ok()?;
 
     // gio 0.22 signature:
@@ -351,15 +1068,28 @@ pub fn mpris_query() -> Option<StreamInfo> {
         .ok()?;
     let names: Vec<String> = reply.get::<(Vec<String>,)>()?.0;
 
-    for name in names.iter().filter(|n| n.starts_with("org.mpris.MediaPlayer2.")) {
+    let mut candidates: Vec<StreamInfo> = Vec::new();
+    for name in names
+        .iter()
+        .filter(|n| n.starts_with("org.mpris.MediaPlayer2."))
+    {
+        let identity = friendly_app_name(name);
+        if let Some(preferred) = preferred_app {
+            // Generic process names (python3, etc.) do not identify a player.
+            // Defer their selection until we know how many players are playing.
+            if !uninformative_app_name(preferred)
+                && !same_app(preferred, &identity)
+                && !generic_player_name(&identity)
+            {
+                continue;
+            }
+        }
         let Ok(props) = bus.call_sync(
             Some(name.as_str()),
             "/org/mpris/MediaPlayer2",
             "org.freedesktop.DBus.Properties",
             "GetAll",
-            Some(&glib::Variant::from((
-                "org.mpris.MediaPlayer2.Player",
-            ))),
+            Some(&glib::Variant::from(("org.mpris.MediaPlayer2.Player",))),
             Some(glib::VariantTy::new("(a{sv})").ok()?),
             gio::DBusCallFlags::NONE,
             250,
@@ -367,8 +1097,7 @@ pub fn mpris_query() -> Option<StreamInfo> {
         ) else {
             continue;
         };
-        let Some(dict) = props.get::<(std::collections::HashMap<String, glib::Variant>,)>()
-        else {
+        let Some(dict) = props.get::<(std::collections::HashMap<String, glib::Variant>,)>() else {
             continue;
         };
         let map = dict.0;
@@ -384,12 +1113,9 @@ pub fn mpris_query() -> Option<StreamInfo> {
         let mut codec: Option<String> = None;
         let mut sr: Option<u32> = None;
         let mut bps: Option<u8> = None;
-        let lower_name = name.to_lowercase();
-        if lower_name.contains("high-tide") || lower_name.contains("hightide") {
-            codec = Some("FLAC (Tidal HiRes)".into());
-        } else if lower_name.contains("feishin") {
-            codec = Some("FLAC / Stream".into());
-        }
+        let mut source_processing: Option<String> = None;
+        let mut source_processing_checked = false;
+        // The application name never establishes a codec or sample rate.
 
         let mut track = name
             .trim_start_matches("org.mpris.MediaPlayer2.")
@@ -402,6 +1128,36 @@ pub fn mpris_query() -> Option<StreamInfo> {
             .get("Metadata")
             .and_then(|v| v.get::<std::collections::HashMap<String, glib::Variant>>())
         {
+            // Optional metadata added to High Tide's MPRIS implementation.
+            // Values describe the actual TIDAL source manifest, not PCM output.
+            if identity == "High Tide" {
+                const P: &str = "io.github.nokse22.high-tide:";
+                codec = meta
+                    .get(&format!("{P}codec"))
+                    .and_then(|v| v.get::<String>())
+                    .filter(|s| !s.trim().is_empty());
+                sr = meta
+                    .get(&format!("{P}sample-rate"))
+                    .and_then(|v| v.get::<u32>())
+                    .filter(|v| (8000..=768000).contains(v));
+                bps = meta
+                    .get(&format!("{P}bit-depth"))
+                    .and_then(|v| v.get::<u32>())
+                    .filter(|v| (1..=64).contains(v))
+                    .map(|v| v as u8);
+                let normalized = meta
+                    .get(&format!("{P}normalization-enabled"))
+                    .and_then(|v| v.get::<bool>());
+                let volume = meta
+                    .get(&format!("{P}player-volume"))
+                    .and_then(|v| v.get::<f64>());
+                let raw_gain_bridge = meta
+                    .get(&format!("{P}gain-report-version"))
+                    .and_then(|v| v.get::<u32>())
+                    == Some(2);
+                (source_processing_checked, source_processing) =
+                    high_tide_gain_report(normalized, volume, raw_gain_bridge);
+            }
             if let Some(t) = meta.get("xesam:title").and_then(|v| v.get::<String>()) {
                 track = t;
             }
@@ -417,17 +1173,51 @@ pub fn mpris_query() -> Option<StreamInfo> {
             }
         }
 
-        return Some(StreamInfo {
+        candidates.push(StreamInfo {
             codec,
             track: Some(track),
             app: Some(friendly_app_name(name)),
             sr,
             bps,
             br: None,
+            source_processing,
+            source_processing_checked,
             mpd: false,
         });
     }
-    None
+    choose_mpris_player(preferred_app, candidates)
+}
+
+// Only associate a generic process with metadata when exactly one MPRIS
+// player is Playing. Multiple simultaneous players remain ambiguous.
+fn choose_mpris_player(preferred: Option<&str>, candidates: Vec<StreamInfo>) -> Option<StreamInfo> {
+    if let Some(name) = preferred.filter(|s| !uninformative_app_name(s)) {
+        let mut matches = candidates
+            .iter()
+            .filter(|p| p.app.as_deref().is_some_and(|a| same_app(a, name)));
+        if let Some(found) = matches.next() {
+            if matches.next().is_none() {
+                return Some(found.clone());
+            }
+            return None;
+        }
+        // Generic browser MPRIS names may be associated with one unambiguous
+        // producer, but must never provide guessed source audio properties.
+        if candidates.len() == 1
+            && candidates[0]
+                .app
+                .as_deref()
+                .is_some_and(generic_player_name)
+        {
+            return candidates.into_iter().next();
+        }
+        return None;
+    }
+    if candidates.len() == 1 {
+        candidates.into_iter().next()
+    } else {
+        None
+    }
 }
 
 pub fn mpd_config_check() -> Vec<String> {
@@ -520,7 +1310,7 @@ pub fn send_mpris_command(command: &str) {
         Ok(b) => b,
         Err(_) => return,
     };
-    
+
     let reply = match bus.call_sync(
         Some("org.freedesktop.DBus"),
         "/org/freedesktop/DBus",
@@ -538,7 +1328,10 @@ pub fn send_mpris_command(command: &str) {
 
     let names: Vec<String> = reply.get::<(Vec<String>,)>().unwrap().0;
     // Find the first active MPRIS player
-    if let Some(player) = names.iter().find(|n| n.starts_with("org.mpris.MediaPlayer2.")) {
+    if let Some(player) = names
+        .iter()
+        .find(|n| n.starts_with("org.mpris.MediaPlayer2."))
+    {
         let _ = bus.call_sync(
             Some(player.as_str()),
             "/org/mpris/MediaPlayer2",
@@ -550,5 +1343,264 @@ pub fn send_mpris_command(command: &str) {
             250,
             gio::Cancellable::NONE,
         );
+    }
+}
+
+#[cfg(test)]
+mod app_attribution_tests {
+    use super::*;
+
+    fn node(app: &str) -> StreamNode {
+        StreamNode {
+            app_name: app.to_string(),
+            node_name: app.to_string(),
+            media_name: format!("{app} audio"),
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn app_name_prefers_pipewire_identity_to_process_name() {
+        let props = serde_json::json!({
+            "application.name": "Firefox",
+            "application.process.binary": "Isolated Web Co",
+        });
+        assert_eq!(playback_app_name(&props, None), "Firefox");
+    }
+
+    #[test]
+    fn binary_fallback_identifies_firefox() {
+        let props = serde_json::json!({ "application.process.binary": "firefox" });
+        assert_eq!(playback_app_name(&props, None), "Firefox");
+    }
+
+    #[test]
+    fn firefox_wins_over_anonymous_youtube_mpris_player() {
+        let graph = PwGraph {
+            streams: vec![node("cava"), node("Firefox")],
+            ..Default::default()
+        };
+        let mpris = StreamInfo {
+            app: Some("Instance_1_50086".to_string()),
+            track: Some("YouTube video title".to_string()),
+            ..Default::default()
+        };
+        let chosen = select_stream(&graph, None, Some(mpris)).unwrap();
+        assert_eq!(chosen.app.as_deref(), Some("Firefox"));
+        assert_eq!(chosen.track.as_deref(), Some("YouTube video title"));
+        assert!(chosen.codec.is_none(), "browser codec must not be guessed");
+    }
+
+    #[test]
+    fn known_mpris_for_another_app_cannot_rename_firefox() {
+        let graph = PwGraph {
+            streams: vec![node("Firefox")],
+            ..Default::default()
+        };
+        let mpris = StreamInfo {
+            app: Some("VLC".to_string()),
+            track: Some("Unrelated track".to_string()),
+            ..Default::default()
+        };
+        let chosen = select_stream(&graph, None, Some(mpris)).unwrap();
+        assert_eq!(chosen.app.as_deref(), Some("Firefox"));
+        assert_ne!(chosen.track.as_deref(), Some("Unrelated track"));
+    }
+
+    #[test]
+    fn high_tide_flatpak_id_overrides_generic_python() {
+        let props = serde_json::json!({
+            "application.name": "python3.13",
+            "pipewire.access.portal.app_id": "io.github.nokse22.high-tide",
+        });
+        assert_eq!(playback_app_name(&props, None), "High Tide");
+    }
+
+    #[test]
+    fn high_tide_client_identity_is_used_when_node_name_is_missing() {
+        let node = serde_json::json!({ "node.name": "python3.13" });
+        let client = serde_json::json!({
+            "application.name": "python3.13",
+            "application.id": "io.github.nokse22.high-tide",
+        });
+        assert_eq!(
+            resolve_playback_app(&node, Some(&client), None),
+            "High Tide"
+        );
+    }
+
+    #[test]
+    fn sole_python_playback_stream_can_use_active_high_tide_mpris() {
+        let graph = PwGraph {
+            streams: vec![node("python3.13")],
+            ..Default::default()
+        };
+        let mpris = StreamInfo {
+            app: Some("High Tide".into()),
+            track: Some("Rattle The Cage".into()),
+            ..Default::default()
+        };
+        let chosen = select_stream(&graph, None, Some(mpris)).unwrap();
+        assert_eq!(chosen.app.as_deref(), Some("High Tide"));
+        assert_eq!(chosen.track.as_deref(), Some("Rattle The Cage"));
+        assert_eq!(chosen.sr, None, "must not invent source sample rate");
+        assert_eq!(chosen.codec, None, "must not infer FLAC from app name");
+    }
+
+    #[test]
+    fn unrelated_player_cannot_rename_python_when_multiple_apps_play() {
+        let graph = PwGraph {
+            streams: vec![node("python3.13"), node("Firefox")],
+            ..Default::default()
+        };
+        let mpris = StreamInfo {
+            app: Some("High Tide".into()),
+            ..Default::default()
+        };
+        let chosen = select_stream(&graph, None, Some(mpris)).unwrap();
+        assert_eq!(chosen.app.as_deref(), Some("python3.13"));
+    }
+
+    #[test]
+    fn matching_player_preserves_real_source_metadata() {
+        let graph = PwGraph {
+            streams: vec![node("High Tide")],
+            ..Default::default()
+        };
+        let media = StreamInfo {
+            app: Some("High Tide".into()),
+            codec: Some("FLAC".into()),
+            sr: Some(44100),
+            bps: Some(16),
+            ..Default::default()
+        };
+        let chosen = select_stream(&graph, None, Some(media)).unwrap();
+        assert_eq!(chosen.codec.as_deref(), Some("FLAC"));
+        assert_eq!(chosen.sr, Some(44100));
+        assert_eq!(chosen.bps, Some(16));
+    }
+
+    #[test]
+    fn unrelated_player_cannot_supply_source_format() {
+        let graph = PwGraph {
+            streams: vec![node("High Tide")],
+            ..Default::default()
+        };
+        let media = StreamInfo {
+            app: Some("Feishin".into()),
+            codec: Some("FLAC".into()),
+            sr: Some(192000),
+            ..Default::default()
+        };
+        let chosen = select_stream(&graph, None, Some(media)).unwrap();
+        assert_ne!(chosen.sr, Some(192000));
+    }
+
+    #[test]
+    fn high_tide_clean_requires_both_reports() {
+        let (known, active) = high_tide_gain_report(Some(false), Some(1.0), true);
+        assert!(known);
+        assert!(active.is_none());
+        let (known, active) = high_tide_gain_report(Some(false), None, true);
+        assert!(!known);
+        assert!(active.is_none());
+        let (known, _) = high_tide_gain_report(None, Some(1.0), true);
+        assert!(!known);
+    }
+
+    #[test]
+    fn high_tide_nonunity_gain_is_not_silently_rounded_to_unity() {
+        let (known, active) = high_tide_gain_report(Some(false), Some(0.96), true);
+        assert!(known);
+        assert!(active.unwrap().contains("0.9600"));
+        // Invalid values must not be treated as confirmation of clean gain.
+        let (known, active) = high_tide_gain_report(Some(false), Some(f64::NAN), true);
+        assert!(!known);
+        assert!(active.is_none());
+    }
+
+    #[test]
+    fn old_rounded_volume_metadata_is_not_proof_of_unity() {
+        let (known, active) = high_tide_gain_report(Some(false), Some(1.0), false);
+        assert!(!known);
+        assert!(active.is_none());
+    }
+
+    #[test]
+    fn high_tide_enabled_normalization_warns_even_if_volume_missing() {
+        let (known, active) = high_tide_gain_report(Some(true), None, true);
+        assert!(!known);
+        assert!(active.unwrap().contains("normalization"));
+    }
+
+    #[test]
+    fn real_source_metadata_carries_clean_gain_evidence() {
+        let graph = PwGraph {
+            streams: vec![node("High Tide")],
+            ..Default::default()
+        };
+        let media = StreamInfo {
+            app: Some("High Tide".into()),
+            sr: Some(48000),
+            source_processing_checked: true,
+            ..Default::default()
+        };
+        let chosen = select_stream(&graph, None, Some(media)).unwrap();
+        assert!(chosen.source_processing_checked);
+        assert!(chosen.source_processing.is_none());
+    }
+
+    #[test]
+    fn generic_python_merges_single_playing_mpris_player() {
+        let graph = PwGraph {
+            streams: vec![node("python3.13")],
+            ..Default::default()
+        };
+        let player = choose_mpris_player(
+            Some("python3.13"),
+            vec![StreamInfo {
+                app: Some("High Tide".into()),
+                track: Some("Track".into()),
+                ..Default::default()
+            }],
+        );
+        let chosen = select_stream(&graph, None, player).unwrap();
+        assert_eq!(chosen.app.as_deref(), Some("High Tide"));
+        assert_eq!(chosen.track.as_deref(), Some("Track"));
+        assert!(chosen.codec.is_none());
+        assert!(chosen.sr.is_none());
+    }
+
+    #[test]
+    fn multiple_playing_players_do_not_rename_generic_python() {
+        let candidates = vec![
+            StreamInfo {
+                app: Some("High Tide".into()),
+                ..Default::default()
+            },
+            StreamInfo {
+                app: Some("VLC".into()),
+                ..Default::default()
+            },
+        ];
+        assert!(choose_mpris_player(Some("python3.13"), candidates).is_none());
+    }
+
+    #[test]
+    fn mpris_known_app_does_not_take_unrelated_player() {
+        let candidates = vec![StreamInfo {
+            app: Some("VLC".into()),
+            ..Default::default()
+        }];
+        assert!(choose_mpris_player(Some("Firefox"), candidates).is_none());
+    }
+
+    #[test]
+    fn no_media_sources_reports_idle() {
+        let graph = PwGraph {
+            streams: vec![node("cava")],
+            ..Default::default()
+        };
+        assert!(select_stream(&graph, None, None).is_none());
     }
 }

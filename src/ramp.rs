@@ -109,7 +109,11 @@ pub fn run(rate: u32) -> serde_json::Value {
     } else if aligned.is_empty() {
         serde_json::json!({ "status": "skipped", "detail": "capture was empty or silent" })
     } else {
-        let diffs = aligned.iter().zip(reference).filter(|(a, b)| a != b).count();
+        let diffs = aligned
+            .iter()
+            .zip(reference)
+            .filter(|(a, b)| a != b)
+            .count();
         serde_json::json!({ "status": "fail", "detail": format!("{} byte(s) differ", diffs) })
     }
 }
