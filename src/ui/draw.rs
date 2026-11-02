@@ -113,11 +113,15 @@ pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
         trunc(&anim.matrix_src_codec, 20)
     );
     let dsp_text = if anim.matrix_dsp.is_empty() || anim.matrix_dsp == "---" {
-        "NONE (Bit-Perfect)".to_string()
+        "No PipeWire DSP detected".to_string()
     } else {
         trunc(&anim.matrix_dsp, 38)
     };
-    let hw_text = format!("{} @ {:.1}kHz", anim.matrix_hw_fmt, anim.matrix_rate);
+    let hw_text = if anim.matrix_rate > 0.0 {
+        format!("{} @ {:.1}kHz", anim.matrix_hw_fmt, anim.matrix_rate)
+    } else {
+        "No open DAC PCM".to_string()
+    };
 
     let steps = [
         ("SOURCE", &src_text, 0.6, 0.4, 1.0),

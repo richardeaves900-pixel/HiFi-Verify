@@ -6,6 +6,7 @@ mod history;
 mod host;
 mod model;
 mod network;
+mod pcm_verify;
 mod pwtop;
 mod ramp;
 mod telemetry;
@@ -42,6 +43,14 @@ struct Args {
     /// View historical XRUN logs
     #[arg(long)]
     history: bool,
+
+    /// Trusted original PCM WAV used for an actual sample-identity check
+    #[arg(long, value_name = "WAV")]
+    verify_reference: Option<std::path::PathBuf>,
+
+    /// Captured PCM WAV from a known, user-selected digital monitor point
+    #[arg(long, value_name = "WAV")]
+    verify_capture: Option<std::path::PathBuf>,
 
     /// Run the ramp/null test
     #[arg(long, name = "ramp-test")]
@@ -96,7 +105,11 @@ fn main() -> std::process::ExitCode {
             reason = "Rate match (unverified)";
         } else if a.verdict.starts_with("UNVERIFIED") {
             state = "amber";
-            reason = "Source sample rate unknown";
+            reason = if a.verdict.contains("graph/source rate") {
+                "Graph/source rate discrepancy"
+            } else {
+                "Source sample rate unknown"
+            };
         } else {
             // If it's not bit-perfect, figure out why for the tooltip
             if !a.processing.is_empty() {
@@ -150,6 +163,24 @@ fn main() -> std::process::ExitCode {
     if args.history {
         println!("{}", history::get_history_summary());
         return std::process::ExitCode::SUCCESS;
+    }
+
+    if args.verify_reference.is_some() || args.verify_capture.is_some() {
+        match (&args.verify_reference, &args.verify_capture) {
+            (Some(reference), Some(capture)) => {
+                let result = pcm_verify::verify_wav(reference, capture);
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                return if result["status"] == "pass" {
+                    std::process::ExitCode::SUCCESS
+                } else {
+                    std::process::ExitCode::from(1)
+                };
+            }
+            _ => {
+                eprintln!("Provide BOTH --verify-reference and --verify-capture WAV files");
+                return std::process::ExitCode::from(2);
+            }
+        }
     }
 
     if args.ramp_test {

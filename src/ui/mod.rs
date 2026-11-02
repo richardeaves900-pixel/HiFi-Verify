@@ -18,6 +18,7 @@ struct Snapshot {
     rows: Vec<NodeRow>,
     sinks: Vec<Sink>,
     stream: StreamInfo,
+    path: Option<telemetry::PcmPathAssessment>,
     processing: Vec<String>,
     hw: Vec<HwParams>,
     driver_rate: Option<u32>,
@@ -285,7 +286,7 @@ fn build_ui(
     c2.append(&lat_lbl);
 
     let c3 = card(&cards, "card-gold");
-    c3.append(&label("SAMPLE RATE", "title-sm", false));
+    c3.append(&label("ACTIVE OUTPUT RATE", "title-sm", false));
     let rate_lbl = label("192.0 kHz", "val-gold", false);
     c3.append(&rate_lbl);
     c3.append(&label("Hi-Res", "sub-text", false));
@@ -475,40 +476,8 @@ fn build_ui(
     btn_reset.add_css_class("btn-cyber");
     right.append(&btn_reset);
 
-    let q_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    q_box.set_homogeneous(true);
-    for q in [64u32, 128, 256, 512, 1024] {
-        let b = gtk::Button::with_label(&format!("Q:{}", q));
-        b.add_css_class("btn-cyber");
-        b.connect_clicked(move |_| {
-            spawn_bg(
-                "pw-metadata",
-                &["-n", "settings", "0", "clock.force-quantum", &q.to_string()],
-            );
-        });
-        q_box.append(&b);
-    }
-    right.append(&q_box);
-
-    let r_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    r_box.set_homogeneous(true);
-    for rt in [44100u32, 48000, 96000, 192000] {
-        let txt = if rt == 44100 {
-            "44.1k".to_string()
-        } else {
-            format!("{}k", rt / 1000)
-        };
-        let b = gtk::Button::with_label(&txt);
-        b.add_css_class("btn-cyber");
-        b.connect_clicked(move |_| {
-            spawn_bg(
-                "pw-metadata",
-                &["-n", "settings", "0", "clock.force-rate", &rt.to_string()],
-            );
-        });
-        r_box.append(&b);
-    }
-    right.append(&r_box);
+    // Read-only monitor: do not change sample rates or buffer quanta.
+    right.append(&label("Playback clocks: read-only", "sub-text", false));
 
     body.append(&right);
     root.append(&body);
@@ -662,32 +631,33 @@ fn build_ui(
                     let is_playing = snap.stream.sr.is_some()
                         || snap.stream.codec.is_some()
                         || snap.stream.app.is_some();
-                    let has_dsp = !snap.processing.is_empty();
-
-                    // A rate match is a useful observation, NOT sample-level proof.
-                    let (health, status_label) = if !is_playing {
-                        (crate::tray::TrayHealth::Idle, "STANDBY".to_string())
-                    } else if has_dsp {
-                        (crate::tray::TrayHealth::Warning, "DSP DETECTED".to_string())
-                    } else if let (Some(source), Some(driver)) = (snap.stream.sr, snap.driver_rate)
-                    {
-                        if source == driver {
-                            (
-                                crate::tray::TrayHealth::RateMatch,
-                                "RATE MATCH (UNVERIFIED)".to_string(),
-                            )
-                        } else {
-                            (
-                                crate::tray::TrayHealth::Warning,
-                                "RATE MISMATCH".to_string(),
-                            )
-                        }
-                    } else {
-                        (crate::tray::TrayHealth::Unknown, "UNVERIFIED".to_string())
+                    let mut detected_processing = snap.processing.clone();
+                    if let Some(ref source) = snap.stream.source_processing {
+                        detected_processing.push(source.clone());
+                    }
+                    let has_dsp = !detected_processing.is_empty();
+                    let observed_pcm = snap.path.as_ref().and_then(|p| p.pcm.as_ref());
+                    // A cumulative pw-top error counter is not a new XRUN.
+                    // The exact same graph/ALSA assessment drives CLI, GUI and tray.
+                    let (health, status_label) = match snap.path.as_ref().map(|p| p.status) {
+                        Some("idle") => (crate::tray::TrayHealth::Idle, "STANDBY".into()),
+                        Some("clear") => (
+                            crate::tray::TrayHealth::RateMatch,
+                            "PCM PATH CLEAR (SAMPLES UNVERIFIED)".into(),
+                        ),
+                        Some("altered") => (
+                            crate::tray::TrayHealth::Warning,
+                            snap.path.as_ref().unwrap().explanation.clone(),
+                        ),
+                        _ => (crate::tray::TrayHealth::Unknown, "UNVERIFIED".into()),
                     };
 
                     let app_name = snap.stream.app.clone().unwrap_or_else(|| "Unknown".into());
-                    let codec = snap.stream.codec.as_deref().unwrap_or("Unknown codec");
+                    let codec = snap
+                        .stream
+                        .codec
+                        .as_deref()
+                        .unwrap_or("Source codec not exposed");
                     let stream_info = match (snap.stream.sr, snap.stream.bps) {
                         (Some(rate), Some(bits)) => {
                             format!("{} · {}-bit / {:.1} kHz", codec, bits, rate as f64 / 1000.0)
@@ -695,7 +665,17 @@ fn build_ui(
                         (Some(rate), None) => {
                             format!("{} · {:.1} kHz", codec, rate as f64 / 1000.0)
                         }
-                        _ => codec.to_string(),
+                        _ => observed_pcm
+                            .as_ref()
+                            .map(|p| {
+                                format!(
+                                    "{} | decoded PCM {} @ {:.1} kHz",
+                                    codec,
+                                    p.format,
+                                    p.rate as f64 / 1000.0
+                                )
+                            })
+                            .unwrap_or_else(|| codec.to_string()),
                     };
                     let pipewire_info = match (snap.driver_rate, snap.driver_quantum) {
                         (Some(rate), Some(q)) => {
@@ -713,9 +693,11 @@ fn build_ui(
                         .map(|hw| format!("{} @ {:.1} kHz", hw.format, hw.rate as f64 / 1000.0))
                         .unwrap_or_else(|| "No open playback PCM".into());
                     let dsp_info = if has_dsp {
-                        snap.processing.join(", ")
+                        detected_processing.join(", ")
+                    } else if snap.stream.source_processing_checked {
+                        "High Tide gain reported clean; other processing unverified".into()
                     } else {
-                        "None detected".into()
+                        "No PipeWire DSP detected; source gain unknown".into()
                     };
                     let xrun_info = snap.total_err.to_string();
 
@@ -821,8 +803,6 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
     std::thread::spawn(move || {
         let mut tick: u64 = 0;
         let mut last_rows: Vec<NodeRow> = Vec::new();
-        let mut last_rate: Option<u32> = None;
-        let mut last_quant: Option<u32> = None;
         let mut last_err: u64 = 0;
         let mut graph = telemetry::PwGraph::default();
         let mut stream = StreamInfo::default();
@@ -831,7 +811,7 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
         loop {
             // pw-top is expensive (~200 ms). Refresh every 4th tick ≈ 2 s.
             if tick % 4 == 0 {
-                let (rows, r, q, e) = pwtop::parse_pw_top();
+                let (rows, _, _, e) = pwtop::parse_pw_top();
 
                 // Log new XRUNs to SQLite
                 if e > last_err {
@@ -840,8 +820,6 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
                 }
 
                 last_rows = rows;
-                last_rate = r;
-                last_quant = q;
                 last_err = e;
             }
 
@@ -863,14 +841,20 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
                 .find(|r| r.status == 'R' && r.wait_us.is_some())
                 .and_then(|r| r.wait_us);
 
+            // Keep output observations separate from arbitrary pw-top nodes.
+            // Evaluate before `hw` is moved into the snapshot.
+            let (node_rate, node_quantum) = telemetry::observed_output_clock(&last_rows);
+            let active_rate = graph.hardware_for_route(&hw).map(|h| h.rate).or(node_rate);
+            let path = graph.assess_pcm_path(&last_rows, &hw, &stream);
             let snap = Snapshot {
                 rows: last_rows.clone(),
                 sinks: graph.sinks.clone(),
                 stream: stream.clone(),
+                path: Some(path),
                 processing,
                 hw,
-                driver_rate: last_rate.or(graph.driver_rate),
-                driver_quantum: last_quant.or(graph.driver_quantum),
+                driver_rate: active_rate,
+                driver_quantum: node_quantum,
                 total_err: last_err,
                 wait_us,
                 volume,
@@ -983,20 +967,46 @@ fn render(
     ui.codec_lbl.set_text(app_name.or(codec).unwrap_or("IDLE"));
 
     let app = app_name.unwrap_or("Unknown application");
-    let codec_name = codec.unwrap_or("Codec unknown");
-    let sub = if let (Some(bps), Some(sr)) = (snap.stream.bps, snap.stream.sr) {
-        format!(
-            "{} · {}-bit / {:.1}kHz",
-            codec_name,
-            bps,
-            sr as f64 / 1000.0
-        )
-    } else if let Some(sr) = snap.stream.sr {
-        format!("{} · {:.1}kHz", codec_name, sr as f64 / 1000.0)
-    } else if let Some(br) = &snap.stream.br {
-        format!("{} · {}", codec_name, br)
-    } else if app_name.is_some() {
-        codec_name.to_string()
+    let codec_name = codec.unwrap_or("Source codec not exposed");
+    // Display the source metadata and BOTH live transport formats.
+    // Do not let source codec availability hide the negotiated PCM details.
+    let source = match (snap.stream.bps, snap.stream.sr) {
+        (Some(bits), Some(rate)) => {
+            format!("{} {}-bit/{:.1}kHz", codec_name, bits, rate as f64 / 1000.0)
+        }
+        (None, Some(rate)) => format!("{} {:.1}kHz", codec_name, rate as f64 / 1000.0),
+        _ => codec_name.to_string(),
+    };
+    let stream_pcm = snap
+        .path
+        .as_ref()
+        .and_then(|p| p.pcm.as_ref())
+        .map(|p| {
+            format!(
+                "Stream {} {:.1}kHz {}ch",
+                p.format,
+                p.rate as f64 / 1000.0,
+                p.channels
+                    .map_or_else(|| "?".to_string(), |c| c.to_string())
+            )
+        })
+        .unwrap_or_else(|| "Stream PCM unknown".to_string());
+    let dac_pcm = snap
+        .hw
+        .first()
+        .filter(|_| snap.hw.len() == 1)
+        .map(|h| {
+            format!(
+                "DAC {} {:.1}kHz {}ch",
+                h.format,
+                h.rate as f64 / 1000.0,
+                h.channels
+                    .map_or_else(|| "?".to_string(), |c| c.to_string())
+            )
+        })
+        .unwrap_or_else(|| "DAC PCM unknown".to_string());
+    let sub = if app_name.is_some() {
+        format!("{} | {} → {}", source, stream_pcm, dac_pcm)
     } else {
         "No active playback".to_string()
     };
@@ -1012,6 +1022,8 @@ fn render(
     if let Some(r) = snap.driver_rate {
         ui.rate_lbl
             .set_text(&format!("{:.1} kHz", r as f64 / 1000.0));
+    } else {
+        ui.rate_lbl.set_text("—");
     }
 
     let delta = snap.total_err.saturating_sub(err_baseline.get());
@@ -1073,17 +1085,30 @@ fn render(
             .codec
             .clone()
             .unwrap_or_else(|| "Unknown".into());
-        a.matrix_dsp = if snap.processing.is_empty() {
-            "---".to_string()
+        let mut processing = snap.processing.clone();
+        if let Some(ref source) = snap.stream.source_processing {
+            processing.push(source.clone());
+        }
+        a.matrix_dsp = if !processing.is_empty() {
+            processing.join(", ")
+        } else if snap.stream.source_processing_checked {
+            "High Tide gain off / unity (reported)".to_string()
         } else {
-            snap.processing.join(", ")
+            "Source gain unknown; PipeWire DSP none".to_string()
         };
         a.matrix_hw_fmt = snap
             .hw
             .first()
             .map(|h| h.format.clone())
             .unwrap_or_else(|| "---".into());
+        // The DAC bus must show the hardware PCM rate, not the PipeWire graph rate.
         a.matrix_rate = snap.driver_rate.unwrap_or(0) as f64 / 1000.0;
+        a.alsa_bitperfect = snap.path.as_ref().is_some_and(|p| p.status == "clear");
+        a.alsa_reason = snap
+            .path
+            .as_ref()
+            .map(|p| p.explanation.clone())
+            .unwrap_or_else(|| "No verified playback path".into());
     }
 }
 
