@@ -1,87 +1,7 @@
-# HiFi Verify
-
-**A native, Flatpak-first PipeWire verification suite for audiophiles.**
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](#)
-
-HiFi Verify is a ground-up Rust rewrite of an earlier Python audio verifier. It is designed to answer one question definitively: **"Is my audio bit-perfect right now, and if not, why?"**
-
-Unlike standard system monitors, HiFi Verify reads directly from the hardware (`/proc/asound`), parses `pw-top` latency metrics, and visually maps the PipeWire signal path. It is distributed as a Flatpak, using secure host-spawning to read hardware metrics without breaking sandbox isolation.
-
----
-
-## ✨ Features
-
-* **Signal Path Matrix:** Instantly see if EasyEffects (or any other DSP) is intercepting your audio, and view the exact format your ALSA hardware is receiving.
-* **Hardware Direct:** Reads `/proc/asound` directly to verify the true DAC format (e.g., `S32_LE @ 48.0kHz`), bypassing PipeWire's abstractions.
-* **Latency Jitter Graphing:** Plots real-time `pw-top` WAIT metrics to detect buffer underruns before you hear them.
-* **CLI & JSON Mode:** Sub-100ms CLI commands (`--health`, `--audit`, `--status`) designed for scripting, status bars, and automation.
-* **KDE Plasma Widget:** A custom plasmoid that sits in your system tray and displays status via color coding: **Green** (bit-perfect), **Red** (compromised/processing), or **Gray** (idle).
-* **Sandbox Safe:** Fully compliant Flatpak architecture using `flatpak-spawn --host` to bridge the sandbox for hardware telemetry.
-
----
-
-## 📸 Screenshot
-
-<img width="2112" height="1187" alt="image" src="https://github.com/user-attachments/assets/ebc356b9-36ce-4eab-9318-4eb5b90f3fda" />
-
-
-
----
-
-## 🚀 Installation
-
-### Option 1: Flatpak (Recommended)
-
-Since the app is not yet on Flathub, build and install it locally:
-
-1. **Install required runtimes:**
-
-   ```bash
-   flatpak install flathub org.gnome.Platform//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
-   ```
-
-2. **Clone the repository and build:**
-
-   ```bash
-   git clone [https://github.com/richardeaves900-pixel/HiFi-Verify.git](https://github.com/richardeaves900-pixel/HiFi-Verify.git)
-   cd HiFi-Verify/flatpak
-   flatpak-builder --user --install --force-clean build-dir org.cachyos.HiFiVerify.yaml
-   ```
-
-> **Note:** If `cargo-sources.json` is out of date, run:
-> ```bash
-> python3 flatpak-cargo-generator.py Cargo.lock -o flatpak/cargo-sources.json
-> ```
-
----
-
-### Option 2: Build from Source (Host)
-
-**Prerequisites:** Rust (1.92+), GTK4 development headers, and PipeWire.
-
-1. **Clone the repository:**
-
-   ```bash
-   git clone [https://github.com/richardeaves900-pixel/HiFi-Verify.git](https://github.com/richardeaves900-pixel/HiFi-Verify.git)
-   cd HiFi-Verify
-   ```
-
-2. **Build and run:**
-
-   ```bash
-   cargo build --release
-   ./target/release/hifi-verify --gui
-   ```
-
----
-
 <div align="center">
 
 # 🎧 HiFi Verify
-### *The Ultimate PipeWire Audio Verification Suite for Linux Audiophiles*
+### *A native PipeWire audio verification and telemetry suite for Linux audiophiles*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Language: Rust](https://img.shields.io/badge/Language-Rust-orange.svg)](https://www.rust-lang.org/)
@@ -92,107 +12,85 @@ Since the app is not yet on Flathub, build and install it locally:
 
 ---
 
-**HiFi Verify** is a high-performance, native, Flatpak-first verification suite designed specifically for Linux audiophiles. Acting as a transparent, low-overhead window into your audio stack, it reads directly from hardware to definitively prove what your DAC is receiving—ensuring true bit-perfect playback without compromise.
+**HiFi Verify** is a high-performance, container-sandboxed utility designed to provide absolute transparency into the Linux audio stack. By bypassing high-level abstractions and reading directly from the underlying hardware interfaces, it gives you definitive proof of what your DAC is receiving—guaranteeing true, uncompromised bit-perfect playback.
 
 ---
 
-## 🔬 Core Audio Verification & Telemetry
+## 🛠️ Key Architectural Features
 
-* **Hardware Direct Reading:** Parses `/proc/asound/card*/pcm*p/sub*/hw_params` directly, bypassing PipeWire's abstractions to read the exact ALSA format (e.g., `S32_LE`) and sample rate your DAC is processing.
-* **ALSA Bit-Perfect Verification:** Dynamically compares the source stream's sample rate against the ALSA hardware rate, surfacing a clear `✓ ALSA Bit-Perfect` or `⚠ ALSA Resampled` status indicator directly in the UI.
-* **DSP Detection:** Scans the PipeWire graph to detect active processing nodes (such as EasyEffects, Carla, or JamesDSP) that compromise bit-perfect workflows.
-* **Signal Path Matrix:** Features a custom Cairo-rendered flowchart mapping the audio path from Source App $\rightarrow$ DSP $\rightarrow$ Final ALSA DAC Bus.
-* **Latency Jitter Graphing:** Plots real-time `pw-top` WAIT metrics (in microseconds) to catch buffer underruns and system jitter before they cause audible artifacts.
-* **Hardware XRUN Tracking:** Monitors per-node dropped frames (XRUNs) and surfaces them instantly on the dashboard.
+* **Hardware-Direct Telemetry:** Bypasses PipeWire abstractions to parse `/proc/asound/card*/pcm*p/sub*/hw_params` directly, revealing the exact active sample rate and ALSA format (e.g., `S32_LE`) processed by your hardware.
+* **Deterministic Bit-Perfect Audit:** Compares source stream parameters against ALSA hardware rates in real time, delivering instant validation (`✓ ALSA Bit-Perfect` vs. `⚠ ALSA Resampled`).
+* **Graph & DSP Inspection:** Scans the active PipeWire graph to detect background processing nodes (such as EasyEffects, Carla, or JamesDSP) that alter bit-streams.
+* **Low-Overhead Performance:** Written in **Rust**, achieving sub-40ms CLI startup times, a ~40MB idle RAM footprint, and multi-threaded event handling via `std::sync::mpsc` channels (maintaining 30 FPS UI rendering while background threads poll hardware every 500ms).
+* **Flatpak Sandbox Integration:** Runs securely inside a Flatpak container while utilizing a controlled `flatpak-spawn --host` bridge to safely query host proc files and run `pw-top`.
+
+---
+
+## 🔬 Core Telemetry & Diagnostics
+
+* **Signal Path Matrix:** A custom Cairo-rendered flowchart mapping your end-to-end audio route:
+  $$\text{Source Application} \longrightarrow \text{Active DSP / Filters} \longrightarrow \text{Final ALSA DAC Bus}$$
+* **Latency & Jitter Graphing:** Plots real-time `pw-top` WAIT metrics (in microseconds) to help spot buffer underruns and system jitter before they manifest as audible dropouts.
+* **Hardware XRUN Tracking:** Monitors per-node dropped frames and logs them into a local SQLite database (`~/.config/hifi-verify/history.db`) for post-session analysis.
+* **DAC Capability Viewer:** Queries hardware endpoints to expose device capabilities, including supported sample rates (8 kHz to 384 kHz), human-readable PCM formats, and Native DSD transport profiles.
 
 ---
 
 ## 💻 Graphical User Interface (GTK4)
 
-* **Native Dark-Mode Dashboard:** Sleek, monospace-themed interface tailored for Linux power users.
-* **DAC Capability Viewer:** Directly queries hardware to display supported sample rates (8kHz to 384kHz), human-readable PCM formats (e.g., Signed 24-bit LE), and Native DSD transport capabilities.
-* **Cava Audio Spectrum:** Built-in, zero-latency 32-band frequency visualizer integrating the `cava` backend. Toggle seamlessly between the Signal Path Matrix and the spectrum with a single click.
-* **Hardware Volume Slider:** Dedicated slider utilizing `wpctl` to adjust hardware DAC volume directly (preventing digital attenuation) with real-time sync to system volume keys.
-* **Live "Now Playing":** Top bar widget displaying the active source application, track name, and audio codec.
-* **Quick Action Buttons:** One-click shortcuts for EasyEffects, KDE Audio Settings, and `qpwgraph`.
-* **XRUN History Viewer:** Popup dialog reading a local SQLite database to display exact timestamps and frequency of past audio dropouts.
+* **Modern Dark-Mode Dashboard:** A sleek, monospace-styled interface tailored for technical workflows and power users.
+* **Cava Audio Spectrum:** An integrated, zero-latency 32-band frequency visualizer driven by the `cava` backend, toggleable directly from the Signal Path view.
+* **Hardware Volume Control:** Bypasses software attenuation by using `wpctl` to adjust hardware DAC levels directly, complete with bi-directional synchronization to system volume keys.
+* **Live "Now Playing" Bar:** Displays active source applications, track metadata, and container codecs at a glance.
+* **Quick-Launch Actions:** One-click shortcuts to open EasyEffects, KDE Audio Settings, or `qpwgraph`.
 
 ---
 
-## 🎛️ System & Media Control
+## 🖥️ System Integration & Tray Control
 
-* **MPRIS Integration:** Full native support for standard Linux media keys.
-* **Playback Controls:** Built-in `⏮ Previous`, `⏯ Play/Pause`, and `⏭ Next` buttons integrated directly into the GUI top bar and System Tray.
-* **Desktop Notifications:** Fires an instant KDE desktop notification if a DSP (like EasyEffects) activates, warning you that bit-perfect playback has been compromised.
-* **Persistent XRUN Logging:** Silently logs XRUN events to `~/.config/hifi-verify/history.db` via SQLite for comprehensive post-session diagnostics.
-
----
-
-## 🖥️ KDE Plasma System Tray & Widgets (`StatusNotifierItem`)
-
-* **Dynamic Color-Coded Icon:** Procedurally generated tray icon that changes color based on system state:
-  * 🟢 **Emerald Green:** Bit-Perfect
-  * 🔴 **Ruby Red:** Compromised / DSP Active
-  * ⚫ **Slate Grey:** Standby
-* **Scroll-Wheel Volume:** Hover over the tray icon and scroll to adjust hardware volume in precise 5% increments.
-* **Live Telemetry Tooltip:** Instantly view the active app, codec, DAC hardware, and DSP filters on hover.
-* **Rich Context Menu:** Right-click for quick access to media controls, volume levels, mute toggle, window visibility, and application exit.
-* **KDE Plasma Widget (QML):** Standalone Plasmoid that polls the CLI via a background timer to display a minimal status indicator directly on your panel.
+* **Dynamic Tray Icon (`StatusNotifierItem`):** Procedurally generated indicator reflecting real-time pipeline status:
+  * 🟢 **Emerald Green:** Bit-Perfect stream active
+  * 🔴 **Ruby Red:** Compromised / DSP processing active
+  * ⚫ **Slate Grey:** Standby / Idle
+* **Scroll-Wheel Volume:** Hover over the system tray icon and scroll to modify hardware volume in precise 5% increments.
+* **Desktop Notifications:** Fires immediate system warnings if a DSP node is activated mid-playback.
+* **KDE Plasma Widget (QML):** A lightweight Plasmoid that polls the background CLI service to display a clean status pill on your panel.
+* **MPRIS & Media Keys:** Full integration with standard Linux media keys (`⏮ Previous`, `⏯ Play/Pause`, `⏭ Next`).
 
 ---
 
-## 🌐 Network Verification
+## 🌐 Network & Renderer Discovery
 
-* **SSDP / UPnP Discovery:** Scans your local network for media renderers (network streamers, smart TVs, Raspberry Pis running UPnP).
-* **Device Resolution:** Fetches device description XML from discovered renderers to display human-readable names (e.g., *"Living Room Streamer"*) alongside their network IP addresses.
+* **SSDP / UPnP Scanner:** Automatically discovers network-attached audio renderers, smart streamers, and Raspberry Pi endpoints across your local subnet.
+* **Device Resolution:** Fetches and parses UPnP device description XML to present human-readable target names alongside their network addresses.
 
 ---
 
-## ⌨️ Command Line Interface (CLI) Reference
+## ⌨️ Command Line Interface (CLI)
 
-| Command | Description |
+The companion CLI provides scriptable diagnostics and headless integration capabilities:
+
+| Option | Description |
 | :--- | :--- |
-| `--health` | Sub-100ms one-line summary of the current audio state. |
-| `--audit` | Dumps a comprehensive JSON report of hardware parameters, active nodes, and warnings. |
-| `--audit --fast` | Skips `pw-top` parsing for a near-instant audit. |
-| `--hw` | Lists detailed ALSA hardware parameters for all playback PCMs. |
-| `--status` | Outputs strict JSON for the KDE widget (`{"state": "green", "reason": "Bit-Perfect"}`). |
-| `--network-scan` | Triggers the SSDP network scanner directly from the terminal. |
-| `--history` | Prints your historical XRUN logs. |
-| `--ramp-test` | Runs a null-test by generating a test WAV, playing it, and capturing it via a loopback to mathematically prove bit-perfect routing. |
-| `--wireplumber` | Generates a persistent WirePlumber rule matching your current hardware rate/quantum. |
-
----
-
-## 🏗️ Architecture & Performance
-
-* **Rust Native Performance:** Achieves ~40ms CLI startup times and maintains a ~40MB RAM footprint at idle.
-* **Flatpak Sandbox Bridge:** Safely operates within a strict Flatpak sandbox while leveraging a secure `flatpak-spawn --host` bridge to inspect host `/proc` files and execute `pw-top`.
-* **Zero Host Dependencies:** Requires zero host runtimes or external interpreted scripts.
-* **Multi-Threaded Event Loop:** Employs `std::sync::mpsc` channels to keep the GTK4 UI rendering smoothly at 30 FPS while background threads poll hardware metrics every 500ms.
+| `--health` | Returns a sub-100ms one-line summary of current audio pipeline health. |
+| `--audit` | Outputs a comprehensive JSON dump of hardware parameters, active nodes, and active warnings. |
+| `--audit --fast` | Performs a near-instant audit by skipping `pw-top` parsing overhead. |
+| `--hw` | Enumerates detailed ALSA hardware capabilities for all registered PCM devices. |
+| `--status` | Outputs strict JSON formatted for external status bars and widgets (`{"state": "green", "reason": "Bit-Perfect"}`). |
+| `--network-scan` | Executes an active SSDP broadcast scan directly from the terminal. |
+| `--history` | Queries and prints historical XRUN dropouts from the SQLite log. |
+| `--ramp-test` | Runs a mathematical null-test by generating a reference WAV, routing it through a loopback, and verifying bit-for-bit transmission. |
+| `--wireplumber` | Generates a persistent WirePlumber configuration rule matching your current optimal hardware rate and quantum. |
 
 ---
 
 ## 📄 License
 
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+Distributed under the **MIT License**. See [LICENSE](LICENSE) for more information.
 
 ---
 
-## 🙏 Acknowledgements & Disclosures
+## 🙏 Acknowledgements
 
-* **[gtk-rs](https://gtk-rs.org/)** – Used for building the native Linux user interface.
-* **`pw-top` Visualizer** – Inspired by the original Python prototype.
-* **AI Disclosure** – Developed with assistance from AI models (Gemini and DeepSeek).
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 🙏 Acknowledgements & Disclosures
-
-* **[gtk-rs](https://gtk-rs.org/)** – Used for building the native Linux user interface.
-* **pw-top Visualizer** – Inspired by the original Python prototype.
-* **AI Disclosure** – This project was developed with assistance from AI models (Gemini and DeepSeek).
+* Built with [gtk-rs](https://gtk-rs.org/) for native Linux UI performance.
+* `pw-top` telemetry concepts inspired by earlier community utility scripts.
