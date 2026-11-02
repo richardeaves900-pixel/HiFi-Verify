@@ -31,3 +31,11 @@ window { background-color: #080d11; color: #e4e4e7; font-family: monospace; }
 
 .card-interactive { transition: background-color 0.2s, border-color 0.2s; }
 .card-interactive:hover { background-color: #111c24; border-color: #475569; }
+
+/* Compact dashboard: readable at 720x430 without cutting off controls. */
+.card { padding: 5px; border-radius: 6px; }
+.topbar-box { padding: 4px 6px; border-radius: 6px; }
+.title-sm { font-size: 10px; }
+.val-green, .val-cyan, .val-gold, .val-purple { font-size: 19px; }
+.sub-text, .sub-green, .sub-purple, .sub-red { font-size: 10px; }
+.btn-cyber, .btn-app-green { padding: 3px 6px; font-size: 10px; }

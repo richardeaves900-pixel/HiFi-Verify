@@ -93,8 +93,8 @@ fn build_ui(
     let win = gtk::ApplicationWindow::builder()
         .application(app)
         .title("HiFi Verify")
-        .default_width(990)
-        .default_height(680)
+        .default_width(720)
+        .default_height(430)
         .build();
 
     // A real draggable title bar and a scrollable interior: the window
@@ -103,25 +103,28 @@ fn build_ui(
     header.set_title_widget(Some(&gtk::Label::new(Some("HiFi Verify"))));
     win.set_titlebar(Some(&header));
     win.set_resizable(true);
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    root.set_margin_top(12);
-    root.set_margin_bottom(12);
-    root.set_margin_start(14);
-    root.set_margin_end(14);
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    root.set_margin_top(7);
+    root.set_margin_bottom(7);
+    root.set_margin_start(8);
+    root.set_margin_end(8);
 
     // ---- Top bar ---------------------------------------------------------
-    let topbar = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    // Compact now-playing bar; infrequently used controls live in an expander.
+    let topbar = gtk::Box::new(gtk::Orientation::Vertical, 3);
     topbar.add_css_class("topbar-box");
-    let top_first = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let top_second = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let top_links = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    top_first.append(&label("● HiFi Verify", "title-sm", false));
-    top_first.append(&label("OUTPUT SINK:", "title-sm", false));
+    let top_first = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let tools_expander = gtk::Expander::new(Some("Devices & tools"));
+    tools_expander.set_expanded(false);
+    let tools_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let tools_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let top_links = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    tools_row.append(&label("OUTPUT SINK:", "title-sm", false));
 
     let combo = gtk::ComboBoxText::new();
     combo.append(Some("default"), "Default PipeWire Sink");
     combo.set_active_id(Some("default"));
-    top_first.append(&combo);
+    tools_row.append(&combo);
 
     let updating_combo = Rc::new(Cell::new(false));
     {
@@ -152,14 +155,14 @@ fn build_ui(
             });
         });
     }
-    top_second.append(&btn_net);
+    tools_row.append(&btn_net);
 
     // Hardware Volume Control
     let vol_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let vol_icon = gtk::Label::new(Some("🔊"));
     let vol_slider = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
     vol_slider.set_draw_value(false);
-    vol_slider.set_size_request(100, -1);
+    vol_slider.set_size_request(84, -1);
     vol_slider.set_value(crate::volume::get_volume());
     vol_slider.set_tooltip_text(Some("PipeWire sink volume (may use software gain)"));
 
@@ -214,7 +217,8 @@ fn build_ui(
     now_lbl.set_margin_start(4);
     now_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
     now_lbl.set_hexpand(true);
-    top_second.append(&now_lbl);
+    now_lbl.set_max_width_chars(42);
+    top_first.append(&now_lbl);
 
     let btn_dac = gtk::Button::with_label("🔍 DAC Caps");
     btn_dac.add_css_class("btn-cyber");
@@ -230,7 +234,7 @@ fn build_ui(
             });
         });
     }
-    top_second.append(&btn_dac);
+    tools_row.append(&btn_dac);
 
     for (text, cls, cmd, args) in [
         ("⚙ EasyEffects", "btn-app-green", "easyeffects", vec![]),
@@ -253,21 +257,36 @@ fn build_ui(
         top_links.append(&b);
     }
     topbar.append(&top_first);
-    topbar.append(&top_second);
-    topbar.append(&top_links);
     root.append(&topbar);
+    // Horizontal scroll prevents long DAC names and tool buttons from inflating
+    // the window's minimum width. All functionality stays one click away.
+    let device_scroll = gtk::ScrolledWindow::new();
+    device_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    device_scroll.set_child(Some(&tools_row));
+    tools_content.append(&device_scroll);
+    let links_scroll = gtk::ScrolledWindow::new();
+    links_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    links_scroll.set_child(Some(&top_links));
+    tools_content.append(&links_scroll);
+    let extra_tools = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let extra_scroll = gtk::ScrolledWindow::new();
+    extra_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    extra_scroll.set_child(Some(&extra_tools));
+    tools_content.append(&extra_scroll);
+    tools_expander.set_child(Some(&tools_content));
+    root.append(&tools_expander);
 
     // ---- Cards -----------------------------------------------------------
-    let cards = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let cards_row_one = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let cards = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let cards_row_one = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     cards_row_one.set_homogeneous(true);
-    let cards_row_two = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let cards_row_two = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     cards_row_two.set_homogeneous(true);
 
     let c1 = card(&cards_row_one, "card-green");
     c1.append(&label("DSP LOAD (W/Q)", "title-sm", false));
     let gauge_area = gtk::DrawingArea::new();
-    gauge_area.set_content_height(56);
+    gauge_area.set_content_height(25);
     c1.append(&gauge_area);
     c1.append(&label("Minimal Latency", "sub-text", false));
 
@@ -291,10 +310,13 @@ fn build_ui(
 
     c_src.append(&label("PLAYER / SOURCE FORMAT", "title-sm", false));
     let codec_lbl = label("FLAC", "val-purple", false);
+    codec_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    codec_lbl.set_max_width_chars(24);
     c_src.append(&codec_lbl);
     let codec_sub = label("Source format unverified", "sub-purple", false);
     codec_sub.set_wrap(true);
     codec_sub.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    codec_sub.set_max_width_chars(26);
     c_src.append(&codec_sub);
 
     let c2 = card(&cards_row_one, "card-cyan");
@@ -330,7 +352,7 @@ fn build_ui(
     let fmt_lbl = label("S32LE 2C", "val-cyan", false);
     c5.append(&fmt_lbl);
     let vu_area = gtk::DrawingArea::new();
-    vu_area.set_content_height(24);
+    vu_area.set_content_height(13);
     c5.append(&vu_area);
 
     cards.append(&cards_row_one);
@@ -338,10 +360,12 @@ fn build_ui(
     root.append(&cards);
 
     // ---- Audit strip ----------------------------------------------------
-    let audit_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let audit_bar = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     audit_bar.add_css_class("topbar-box");
     audit_bar.append(&label("AUDIT:", "title-sm", false));
-    let audit_summary = label("Click 'Run Audit' to check the chain", "sub-text", true);
+    let audit_summary = label("Click Run Audit to check the chain", "sub-text", true);
+    audit_summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    audit_summary.set_max_width_chars(40);
     audit_bar.append(&audit_summary);
 
     let btn_audit = gtk::Button::with_label("Run Audit");
@@ -362,9 +386,9 @@ fn build_ui(
     btn_wp.add_css_class("btn-cyber");
 
     audit_bar.append(&btn_audit);
-    audit_bar.append(&btn_ramp);
-    audit_bar.append(&btn_hist);
-    audit_bar.append(&btn_wp);
+    extra_tools.append(&btn_ramp);
+    extra_tools.append(&btn_hist);
+    extra_tools.append(&btn_wp);
     root.append(&audit_bar);
 
     // Each button runs its slow work on a worker thread. GTK widgets are
@@ -377,6 +401,7 @@ fn build_ui(
         glib::timeout_add_local(Duration::from_millis(100), move || {
             while let Ok(text) = audit_rx.try_recv() {
                 summary.set_text(&text);
+                summary.set_tooltip_text(Some(&text));
             }
             glib::ControlFlow::Continue
         });
@@ -442,7 +467,7 @@ fn build_ui(
     });
 
     // ---- Body ------------------------------------------------------------
-    let body = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let body = gtk::Box::new(gtk::Orientation::Horizontal, 7);
     body.set_vexpand(true);
 
     // Left: node table
@@ -467,7 +492,7 @@ fn build_ui(
     // Right: spectrum + scope + controls
     let right = gtk::Box::new(gtk::Orientation::Vertical, 8);
     right.add_css_class("card");
-    right.set_size_request(270, -1);
+    right.set_size_request(225, -1);
 
     let toggle_btn = gtk::ToggleButton::with_label("SIGNAL PATH MATRIX");
     toggle_btn.add_css_class("btn-cyber");
@@ -477,12 +502,13 @@ fn build_ui(
     crate::cava::spawn_cava_worker(spec_data.clone());
 
     let spec_area = gtk::DrawingArea::new();
-    spec_area.set_content_height(260);
+    spec_area.set_content_height(135);
     spec_area.set_vexpand(true);
     right.append(&spec_area);
 
     right.append(&label("LATENCY JITTER (us)", "title-sm", false));
     let scope_area = gtk::DrawingArea::new();
+    scope_area.set_content_height(52);
     scope_area.set_vexpand(true);
     right.append(&scope_area);
 
@@ -495,22 +521,19 @@ fn build_ui(
     right.append(&label("Playback clocks: read-only", "sub-text", false));
 
     body.append(&right);
-    root.append(&body);
+    // Large graphs and the full node table are optional, not permanent
+    // space consumers in the compact dashboard.
+    let details_expander = gtk::Expander::new(Some("More details: nodes & signal graphs"));
+    details_expander.set_expanded(false);
+    let detail_scroll = gtk::ScrolledWindow::new();
+    detail_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    detail_scroll.set_min_content_height(235);
+    detail_scroll.set_max_content_height(340);
+    detail_scroll.set_child(Some(&body));
+    details_expander.set_child(Some(&detail_scroll));
+    root.append(&details_expander);
 
-    // ---- Footer ----------------------------------------------------------
-    let ftr = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    ftr.append(&label(
-        "Kernel: Linux CachyOS • Rust v5 • Flatpak host bridge ready",
-        "sub-text",
-        true,
-    ));
-    ftr.append(&label(
-        "S=Suspended  I=Idle  R=Running  E=Error",
-        "sub-text",
-        true,
-    ));
-    root.append(&ftr);
-
+    // Static footer removed to keep the default dashboard compact.
     let viewport = gtk::ScrolledWindow::new();
     viewport.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     viewport.set_child(Some(&root));
@@ -1041,7 +1064,27 @@ fn render(
     } else {
         "No active playback".to_string()
     };
-    ui.codec_sub.set_text(&sub);
+    let brief_source = if codec.is_some() {
+        source
+    } else {
+        "Source unknown".to_string()
+    };
+    let brief_stream = snap
+        .path
+        .as_ref()
+        .and_then(|p| p.pcm.as_ref())
+        .map(|p| format!("{} {:.1}k", p.format, p.rate as f64 / 1000.0))
+        .unwrap_or_else(|| "PCM ?".into());
+    let brief_dac = snap
+        .dac_hw
+        .as_ref()
+        .map(|h| format!("{} {:.1}k", h.format, h.rate as f64 / 1000.0))
+        .unwrap_or_else(|| "DAC ?".into());
+    ui.codec_sub.set_text(&format!(
+        "{}\n{} → {}",
+        brief_source, brief_stream, brief_dac
+    ));
+    ui.codec_sub.set_tooltip_text(Some(&sub));
 
     if let Some(q) = snap.driver_quantum {
         ui.quant_lbl.set_text(&q.to_string());
@@ -1155,7 +1198,7 @@ fn label(text: &str, css: &str, hexpand: bool) -> gtk::Label {
 }
 
 fn card(container: &gtk::Box, border: &str) -> gtk::Box {
-    let c = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    let c = gtk::Box::new(gtk::Orientation::Vertical, 2);
     c.add_css_class("card");
     c.add_css_class(border);
     container.append(&c);
