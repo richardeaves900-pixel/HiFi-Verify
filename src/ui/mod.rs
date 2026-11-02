@@ -24,6 +24,7 @@ struct Snapshot {
     driver_quantum: Option<u32>,
     total_err: u64,
     wait_us: Option<f64>,
+    volume: Option<f64>,
 }
 
 struct Ui {
@@ -145,14 +146,26 @@ fn build_ui(
     vol_slider.set_draw_value(false);
     vol_slider.set_size_request(100, -1);
     vol_slider.set_value(crate::volume::get_volume());
-    vol_slider.set_tooltip_text(Some("Hardware DAC Volume (Bit-Perfect)"));
+    vol_slider.set_tooltip_text(Some("PipeWire sink volume (may use software gain)"));
 
-    {
-        vol_slider.connect_value_changed(move |s| {
-            if !s.is_focus() && !s.has_focus() { 
-                // Only update via drag
+    // GTK must not wait for wpctl on each slider movement. A dedicated worker
+    // consumes pending values, keeping only the most recent during a drag.
+    let updating_volume = Rc::new(Cell::new(false));
+    let (volume_tx, volume_rx) = std::sync::mpsc::channel::<f64>();
+    std::thread::spawn(move || {
+        while let Ok(mut value) = volume_rx.recv() {
+            while let Ok(newer) = volume_rx.try_recv() {
+                value = newer;
             }
-            crate::volume::set_volume(s.value());
+            crate::volume::set_volume(value);
+        }
+    });
+    {
+        let updating_volume = updating_volume.clone();
+        vol_slider.connect_value_changed(move |s| {
+            if !updating_volume.get() {
+                let _ = volume_tx.send(s.value());
+            }
         });
     }
     
@@ -189,11 +202,16 @@ fn build_ui(
 
     let btn_dac = gtk::Button::with_label("🔍 DAC Caps");
     btn_dac.add_css_class("btn-cyber");
+    let (dac_tx, dac_rx) = std::sync::mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     {
-        let parent = win.clone();
+        let button = btn_dac.clone();
         btn_dac.connect_clicked(move |_| {
-            let (rates, formats, dsd) = crate::dac::get_dac_capabilities();
-            show_dac_dialog(&parent, rates, formats, dsd);
+            button.set_sensitive(false);
+            let tx = dac_tx.clone();
+            std::thread::spawn(move || {
+                let result = crate::dac::get_dac_capabilities();
+                let _ = tx.send(result);
+            });
         });
     }
     topbar.append(&btn_dac);
@@ -597,58 +615,72 @@ fn build_ui(
         let updating_combo = updating_combo.clone();
         let err_baseline = err_baseline.clone();
         let tray_handle_clone = tray_handle.clone();
+        let updating_volume = updating_volume.clone();
         glib::timeout_add_local(Duration::from_millis(100), move || {
             while let Ok(snap) = rx.try_recv() {
                 render(&ui, &anim, &updating_combo, &err_baseline, &snap);
-                
-                // Sync volume slider if changed externally (e.g. keyboard keys)
+
+                // wpctl has already run in the telemetry worker, never here.
                 if !vol_slider.is_focus() {
-                    let current_vol = crate::volume::get_volume();
-                    if (vol_slider.value() - current_vol).abs() > 0.01 {
-                        vol_slider.set_value(current_vol);
+                    if let Some(current_vol) = snap.volume {
+                        if (vol_slider.value() - current_vol).abs() > 0.01 {
+                            updating_volume.set(true);
+                            vol_slider.set_value(current_vol.clamp(0.0, 1.0));
+                            updating_volume.set(false);
+                        }
                     }
                 }
                 
                 if let Some(ref th) = tray_handle_clone {
-                    let is_playing = snap.stream.sr.is_some() || snap.stream.codec.is_some();
+                    let is_playing = snap.stream.sr.is_some()
+                        || snap.stream.codec.is_some()
+                        || snap.stream.app.is_some();
                     let has_dsp = !snap.processing.is_empty();
-                    
-                    let (is_bitperfect, status_label) = if !is_playing {
-                        (false, "STANDBY".to_string())
+
+                    // A rate match is a useful observation, NOT sample-level proof.
+                    let (health, status_label) = if !is_playing {
+                        (crate::tray::TrayHealth::Idle, "STANDBY".to_string())
                     } else if has_dsp {
-                        (false, "DSP ACTIVE".to_string())
-                    } else if let (Some(s), Some(d)) = (snap.stream.sr, snap.driver_rate) {
-                        if s == d {
-                            (true, "BIT-PERFECT".to_string())
+                        (crate::tray::TrayHealth::Warning, "DSP DETECTED".to_string())
+                    } else if let (Some(source), Some(driver)) = (snap.stream.sr, snap.driver_rate) {
+                        if source == driver {
+                            (crate::tray::TrayHealth::RateMatch, "RATE MATCH (UNVERIFIED)".to_string())
                         } else {
-                            (false, format!("RESAMPLED ({}k➔{}k)", s / 1000, d / 1000))
+                            (crate::tray::TrayHealth::Warning, "RATE MISMATCH".to_string())
                         }
                     } else {
-                        // No DSP, playing, but source rate unknown. Trust the Matrix.
-                        (true, "BIT-PERFECT".to_string())
+                        (crate::tray::TrayHealth::Unknown, "UNVERIFIED".to_string())
                     };
 
-                    let app_name = snap.stream.app.clone().unwrap_or_else(|| "Idle".to_string());
-                    let codec = snap.stream.codec.clone().unwrap_or_else(|| "---".to_string());
-                    
-                    let stream_info = if let Some(sr) = snap.stream.sr {
-                        format!("{} @ {:.1} kHz", codec, sr as f64 / 1000.0)
-                    } else { codec };
-                    
-                    let hw_info = if let (Some(hw), Some(dr)) = (snap.hw.first(), snap.driver_rate) {
-                        format!("{} @ {:.1} kHz", hw.format, dr as f64 / 1000.0)
-                    } else { "---".to_string() };
-                    
-                    let dsp_info = if has_dsp { snap.processing.join(", ") } else { "None".to_string() };
+                    let app_name = snap.stream.app.clone().unwrap_or_else(|| "Unknown".into());
+                    let codec = snap.stream.codec.as_deref().unwrap_or("Unknown codec");
+                    let stream_info = match (snap.stream.sr, snap.stream.bps) {
+                        (Some(rate), Some(bits)) => format!("{} · {}-bit / {:.1} kHz", codec, bits, rate as f64 / 1000.0),
+                        (Some(rate), None) => format!("{} · {:.1} kHz", codec, rate as f64 / 1000.0),
+                        _ => codec.to_string(),
+                    };
+                    let pipewire_info = match (snap.driver_rate, snap.driver_quantum) {
+                        (Some(rate), Some(q)) => format!("{:.1} kHz · Q{}", rate as f64 / 1000.0, q),
+                        (Some(rate), None) => format!("{:.1} kHz · quantum unknown", rate as f64 / 1000.0),
+                        (None, Some(q)) => format!("rate unknown · Q{}", q),
+                        _ => "Unknown".into(),
+                    };
+                    let hw_info = snap.hw.first()
+                        .map(|hw| format!("{} @ {:.1} kHz", hw.format, hw.rate as f64 / 1000.0))
+                        .unwrap_or_else(|| "No open playback PCM".into());
+                    let dsp_info = if has_dsp { snap.processing.join(", ") } else { "None detected".into() };
+                    let xrun_info = snap.total_err.to_string();
 
-                    let _ = th.update(|t| {
+                    let _ = th.update(move |t| {
                         t.status_label = status_label;
-                        t.is_bitperfect = is_bitperfect;
+                        t.health = health;
                         t.is_playing = is_playing;
                         t.app_name = app_name;
                         t.stream_info = stream_info;
                         t.hw_info = hw_info;
                         t.dsp_info = dsp_info;
+                        t.pipewire_info = pipewire_info;
+                        t.xrun_info = xrun_info;
                     });
                 }
             }
@@ -698,12 +730,16 @@ fn build_ui(
     });
     win.present();
 
-    // Handle System Tray Clicks (Show Window)
+    // Tray click / Show-Hide menu actually toggles the window.
     if let Some(rx) = tray_rx {
         let win_clone = win.clone();
         glib::timeout_add_local(Duration::from_millis(200), move || {
-            while let Ok(_) = rx.try_recv() {
-                win_clone.present();
+            while rx.try_recv().is_ok() {
+                if win_clone.is_visible() {
+                    win_clone.set_visible(false);
+                } else {
+                    win_clone.present();
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -719,6 +755,18 @@ fn build_ui(
             glib::ControlFlow::Continue
         });
     }
+
+    // Only create GTK dialogs on the main thread, after DAC work finishes.
+    {
+        let parent = win.clone();
+        glib::timeout_add_local(Duration::from_millis(100), move || {
+            while let Ok((rates, formats, dsd)) = dac_rx.try_recv() {
+                btn_dac.set_sensitive(true);
+                show_dac_dialog(&parent, rates, formats, dsd);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 }
 
 fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
@@ -728,6 +776,9 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
         let mut last_rate: Option<u32> = None;
         let mut last_quant: Option<u32> = None;
         let mut last_err: u64 = 0;
+        let mut graph = telemetry::PwGraph::default();
+        let mut stream = StreamInfo::default();
+        let mut volume = None;
 
         loop {
             // pw-top is expensive (~200 ms). Refresh every 4th tick ≈ 2 s.
@@ -746,11 +797,19 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
                 last_err = e;
             }
 
+            // The hardware format remains fresh on each snapshot. Expensive
+            // process-based graph/metadata reads are cached between polls.
             let hw = read_alsa_hw_params();
-            let graph = telemetry::PwGraph::load();
-            let stream = telemetry::mpd_query()
-                .or_else(telemetry::mpris_query)
-                .or_else(|| graph.primary_stream());
+            if tick % 4 == 0 {
+                graph = telemetry::PwGraph::load();
+            }
+            if tick % 2 == 0 {
+                stream = telemetry::mpd_query()
+                    .or_else(telemetry::mpris_query)
+                    .or_else(|| graph.primary_stream())
+                    .unwrap_or_default();
+                volume = crate::volume::try_get_volume();
+            }
 
             let processing = graph.processing.clone();
 
@@ -761,13 +820,14 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
             let snap = Snapshot {
                 rows: last_rows.clone(),
                 sinks: graph.sinks.clone(),
-                stream: stream.unwrap_or_default(),
+                stream: stream.clone(),
                 processing,
                 hw,
                 driver_rate: last_rate.or(graph.driver_rate),
                 driver_quantum: last_quant.or(graph.driver_quantum),
                 total_err: last_err,
                 wait_us,
+                volume,
             };
 
             if tx.send(snap).is_err() {
@@ -786,13 +846,8 @@ fn render(
     err_baseline: &Cell<u64>,
     snap: &Snapshot,
 ) {
-    // Node table
+    // Reuse existing GTK labels instead of removing/recreating every row.
     let mut child = ui.node_box.first_child();
-    while let Some(c) = child {
-        let next = c.next_sibling();
-        ui.node_box.remove(&c);
-        child = next;
-    }
     for row in &snap.rows {
         let prefix = if row.status == 'R' { "▸ " } else { "  " };
         let status = match row.status {
@@ -813,7 +868,33 @@ fn render(
         } else {
             "row-idle"
         };
-        ui.node_box.append(&label(&text, css, false));
+        if let Some(widget) = child.take() {
+            child = widget.next_sibling();
+            match widget.downcast::<gtk::Label>() {
+                Ok(existing) => {
+                    if existing.text().as_str() != text {
+                        existing.set_text(&text);
+                    }
+                    if !existing.has_css_class(css) {
+                        for class in ["row-warn", "row-run", "row-idle"] {
+                            existing.remove_css_class(class);
+                        }
+                        existing.add_css_class(css);
+                    }
+                }
+                Err(other) => {
+                    ui.node_box.remove(&other);
+                    ui.node_box.append(&label(&text, css, false));
+                }
+            }
+        } else {
+            ui.node_box.append(&label(&text, css, false));
+        }
+    }
+    // Remove only leftover rows when the node count shrinks.
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        ui.node_box.remove(&widget);
     }
 
     // Sink combo — only rebuild when the set of sinks changed

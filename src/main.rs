@@ -157,18 +157,21 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    if args.gui {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let tray = tray::HiFiTray::new(tx);
-        use ksni::blocking::TrayMethods;
-        let tray_handle = tray.spawn().expect("Failed to spawn system tray");
-        println!("--> System Tray registered on DBus.");
-
-        ui::run(Some(rx), Some(tray_handle));
-        return std::process::ExitCode::SUCCESS;
+    // --gui is retained as a compatible alias; every non-CLI launch now
+    // registers the KDE StatusNotifier tray instead of only --gui launches.
+    let _ = args.gui;
+    use ksni::blocking::TrayMethods;
+    let (tx, rx) = std::sync::mpsc::channel();
+    match tray::HiFiTray::new(tx).spawn() {
+        Ok(handle) => {
+            eprintln!("HiFi Verify: system tray registered");
+            ui::run(Some(rx), Some(handle));
+        }
+        Err(err) => {
+            // An unavailable D-Bus tray must not stop the desktop app.
+            eprintln!("HiFi Verify: tray unavailable ({err:?}); continuing without it");
+            ui::run(None, None);
+        }
     }
-
-    // No args: launch GUI by default
-    ui::run(None, None);
     std::process::ExitCode::SUCCESS
 }

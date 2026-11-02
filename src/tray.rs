@@ -1,15 +1,26 @@
 use std::sync::mpsc::Sender;
 use ksni::menu::{MenuItem, StandardItem};
 
+/// Colour describes what we actually know, not a bit-perfect proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayHealth {
+    Idle,
+    RateMatch,
+    Unknown,
+    Warning,
+}
+
 pub struct HiFiTray {
     pub tx: Sender<()>,
     pub status_label: String,
-    pub is_bitperfect: bool,
+    pub health: TrayHealth,
     pub is_playing: bool,
     pub app_name: String,
     pub stream_info: String,
     pub hw_info: String,
     pub dsp_info: String,
+    pub pipewire_info: String,
+    pub xrun_info: String,
 }
 
 impl HiFiTray {
@@ -17,12 +28,14 @@ impl HiFiTray {
         Self {
             tx,
             status_label: "STANDBY".into(),
-            is_bitperfect: false,
+            health: TrayHealth::Idle,
             is_playing: false,
             app_name: "Idle".into(),
             stream_info: "---".into(),
             hw_info: "---".into(),
-            dsp_info: "None".into(),
+            dsp_info: "None detected".into(),
+            pipewire_info: "Unknown".into(),
+            xrun_info: "Unknown".into(),
         }
     }
 }
@@ -46,22 +59,16 @@ impl ksni::Tray for HiFiTray {
 
     // Hover Tooltip in KDE Plasma
     fn tool_tip(&self) -> ksni::ToolTip {
-        let title = if !self.is_playing {
-            "HiFi Verify — ● STANDBY".to_string()
-        } else if self.is_bitperfect {
-            "HiFi Verify — ● BIT-PERFECT".to_string()
-        } else {
-            format!("HiFi Verify — ● {}", self.status_label)
-        };
-
-        let description = if !self.is_playing {
-            format!("No active audio stream\nDAC Bus: {}\nDSP: {}", self.hw_info, self.dsp_info)
-        } else {
-            format!(
-                "Source: {} ({})\nDAC Bus: {}\nDSP Chain: {}",
-                self.app_name, self.stream_info, self.hw_info, self.dsp_info
-            )
-        };
+        let title = format!("HiFi Verify — {}", self.status_label);
+        let description = format!(
+            "Player: {}\nSource: {}\nPipeWire: {}\nDAC: {}\nDSP: {}\nXRUN counter: {}",
+            self.app_name,
+            self.stream_info,
+            self.pipewire_info,
+            self.hw_info,
+            self.dsp_info,
+            self.xrun_info,
+        );
 
         ksni::ToolTip {
             title,
@@ -71,22 +78,19 @@ impl ksni::Tray for HiFiTray {
         }
     }
 
-    // Procedural 32x32 ARGB32 badge: Emerald (Bit-Perfect), Red (Compromised), Slate (Standby)
+    // Procedural 32x32 ARGB32 badge: slate idle, green rate match,
+    // amber insufficient evidence, red explicit mismatch/DSP detected.
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         let width = 32;
         let height = 32;
         let mut data = Vec::with_capacity((width * height * 4) as usize);
         let (cx, cy) = (15.5_f32, 15.5_f32);
 
-        let (ring_r, ring_g, ring_b, bar_r, bar_g, bar_b) = if !self.is_playing {
-            // Standby: Muted Slate
-            (100, 116, 139, 148, 163, 184)
-        } else if self.is_bitperfect {
-            // Bit-Perfect: Emerald Green
-            (15, 184, 128, 15, 217, 153)
-        } else {
-            // Resampled / DSP Active: Ruby Red
-            (239, 68, 68, 251, 146, 60)
+        let (ring_r, ring_g, ring_b, bar_r, bar_g, bar_b) = match self.health {
+            TrayHealth::Idle => (100, 116, 139, 148, 163, 184),
+            TrayHealth::RateMatch => (15, 184, 128, 15, 217, 153),
+            TrayHealth::Unknown => (245, 158, 11, 252, 211, 77),
+            TrayHealth::Warning => (239, 68, 68, 251, 146, 60),
         };
 
         for y in 0..height {
@@ -136,13 +140,7 @@ impl ksni::Tray for HiFiTray {
 
     // Right-Click Context Menu with live playback telemetry
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let header = if !self.is_playing {
-            "● STATUS: STANDBY (Idle)".to_string()
-        } else if self.is_bitperfect {
-            "✓ BIT-PERFECT: YES (Direct Hardware)".to_string()
-        } else {
-            format!("✗ BIT-PERFECT: NO ({})", self.status_label)
-        };
+        let header = format!("● STATUS: {}", self.status_label);
 
         // Helper to create un-clickable but white text items
         let info_item = |label: String| StandardItem {
@@ -155,10 +153,12 @@ impl ksni::Tray for HiFiTray {
         vec![
             info_item(header).into(),
             MenuItem::Separator,
-            info_item(format!("Source App:  {}", self.app_name)).into(),
-            info_item(format!("Stream Format: {}", self.stream_info)).into(),
-            info_item(format!("DAC Hardware: {}", self.hw_info)).into(),
-            info_item(format!("DSP / Filters: {}", self.dsp_info)).into(),
+            info_item(format!("Player: {}", self.app_name)).into(),
+            info_item(format!("Source: {}", self.stream_info)).into(),
+            info_item(format!("PipeWire: {}", self.pipewire_info)).into(),
+            info_item(format!("DAC: {}", self.hw_info)).into(),
+            info_item(format!("DSP: {}", self.dsp_info)).into(),
+            info_item(format!("XRUN counter: {}", self.xrun_info)).into(),
             MenuItem::Separator,
             StandardItem {
                 label: "⏮ Previous".into(),
