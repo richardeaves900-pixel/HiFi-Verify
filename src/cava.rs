@@ -30,11 +30,12 @@ pub fn spawn_cava_worker(bands: Arc<Mutex<Vec<f64>>>) {
         for line in reader.lines() {
             if let Ok(l) = line {
                 // Cava outputs strings like "10;20;15;..." followed by a semicolon
-                let parts: Vec<f64> = l.trim_end_matches(';')
+                let parts: Vec<f64> = l
+                    .trim_end_matches(';')
                     .split(';')
                     .filter_map(|s| s.parse::<f64>().ok())
                     .collect();
-                
+
                 if parts.len() == 32 {
                     if let Ok(mut b) = bands.lock() {
                         *b = parts;

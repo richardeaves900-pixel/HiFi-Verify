@@ -1,5 +1,5 @@
-use std::sync::mpsc::Sender;
 use ksni::menu::{MenuItem, StandardItem};
+use std::sync::mpsc::Sender;
 
 /// Colour describes what we actually know, not a bit-perfect proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,7 +204,10 @@ impl ksni::Tray for HiFiTray {
             StandardItem {
                 label: "🔇 Mute / Unmute".into(),
                 activate: Box::new(|_| {
-                    let _ = crate::host::host_cmd(&["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"], std::time::Duration::from_millis(200));
+                    let _ = crate::host::host_cmd(
+                        &["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"],
+                        std::time::Duration::from_millis(200),
+                    );
                 }),
                 ..Default::default()
             }

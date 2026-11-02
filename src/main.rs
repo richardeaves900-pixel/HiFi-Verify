@@ -1,17 +1,17 @@
 mod alsa_proc;
 mod audit;
+mod cava;
+mod dac;
+mod history;
 mod host;
 mod model;
+mod network;
 mod pwtop;
 mod ramp;
 mod telemetry;
-mod cava;
-mod network;
-mod dac;
-mod volume;
-mod history;
 mod tray;
 mod ui;
+mod volume;
 mod wireplumber;
 
 use clap::Parser;
@@ -84,7 +84,7 @@ fn main() -> std::process::ExitCode {
 
     if args.status {
         let a = audit::build_audit(true);
-        
+
         let mut state = "red";
         let mut reason = "Compromised";
 
@@ -93,7 +93,10 @@ fn main() -> std::process::ExitCode {
             reason = "Standby";
         } else if a.verdict.contains("POTENTIALLY BIT-PERFECT") {
             state = "green";
-            reason = "Bit-Perfect";
+            reason = "Rate match (unverified)";
+        } else if a.verdict.starts_with("UNVERIFIED") {
+            state = "amber";
+            reason = "Source sample rate unknown";
         } else {
             // If it's not bit-perfect, figure out why for the tooltip
             if !a.processing.is_empty() {
@@ -102,7 +105,7 @@ fn main() -> std::process::ExitCode {
                 reason = "Resampling";
             }
         }
-        
+
         // Output strict JSON
         println!("{{\"state\": \"{}\", \"reason\": \"{}\"}}", state, reason);
         return std::process::ExitCode::SUCCESS;
@@ -119,7 +122,11 @@ fn main() -> std::process::ExitCode {
             .driver_quantum
             .map(|q| format!("Q{}", q))
             .unwrap_or_else(|| "—".into());
-        let codec_str = a.stream_codec.clone().unwrap_or_else(|| "IDLE".into());
+        let codec_str = a
+            .stream_codec
+            .clone()
+            .or_else(|| a.stream_app.clone())
+            .unwrap_or_else(|| "IDLE".into());
         println!(
             "{} | {} | {} | {}",
             codec_str,
@@ -146,7 +153,10 @@ fn main() -> std::process::ExitCode {
     }
 
     if args.ramp_test {
-        println!("{}", serde_json::to_string_pretty(&ramp::run(48000)).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ramp::run(48000)).unwrap()
+        );
         return std::process::ExitCode::SUCCESS;
     }
 

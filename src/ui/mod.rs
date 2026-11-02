@@ -50,7 +50,11 @@ pub fn run(
     tray_handle: Option<ksni::blocking::Handle<crate::tray::HiFiTray>>,
 ) {
     let app = gtk::Application::builder()
-        .application_id("org.cachyos.HiFiVerify")
+        .application_id(if std::env::var_os("HIFI_VERIFY_DEV").is_some() {
+            "org.cachyos.HiFiVerify.Dev"
+        } else {
+            "org.cachyos.HiFiVerify"
+        })
         .build();
 
     let tray_rx_shared = std::sync::Arc::new(std::sync::Mutex::new(tray_rx));
@@ -168,7 +172,7 @@ fn build_ui(
             }
         });
     }
-    
+
     vol_box.append(&vol_icon);
     vol_box.append(&vol_slider);
     topbar.append(&vol_box);
@@ -176,7 +180,7 @@ fn build_ui(
     // Media Controls
     let media_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     media_box.add_css_class("btn-cyber");
-    
+
     let btn_prev = gtk::Button::with_label("⏮");
     btn_prev.set_tooltip_text(Some("Previous Track"));
     btn_prev.connect_clicked(|_| crate::telemetry::send_mpris_command("Previous"));
@@ -191,7 +195,7 @@ fn build_ui(
     btn_next.set_tooltip_text(Some("Next Track"));
     btn_next.connect_clicked(|_| crate::telemetry::send_mpris_command("Next"));
     media_box.append(&btn_next);
-    
+
     topbar.append(&media_box);
 
     // Now Playing Text in the top bar
@@ -218,7 +222,12 @@ fn build_ui(
 
     for (text, cls, cmd, args) in [
         ("⚙ EasyEffects", "btn-app-green", "easyeffects", vec![]),
-        ("🔊 Audio Settings", "btn-cyber", "kcmshell6", vec!["kcm_pulseaudio"]),
+        (
+            "🔊 Audio Settings",
+            "btn-cyber",
+            "kcmshell6",
+            vec!["kcm_pulseaudio"],
+        ),
         ("🔗 qpwgraph", "btn-cyber", "qpwgraph", vec![]),
     ] {
         let b = gtk::Button::with_label(text);
@@ -250,7 +259,11 @@ fn build_ui(
     let c_src_gesture = gtk::GestureClick::new();
     c_src_gesture.connect_pressed(|_, _, _, _| {
         // Try Feishin first, then High Tide (the spawn_bg checks PATH)
-        if std::process::Command::new("feishin").arg("--version").output().is_ok() {
+        if std::process::Command::new("feishin")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
             spawn_bg("feishin", &[]);
         } else {
             spawn_bg("high-tide", &[]);
@@ -258,7 +271,7 @@ fn build_ui(
     });
     c_src.add_controller(c_src_gesture);
 
-    c_src.append(&label("SOURCE FORMAT", "title-sm", false));
+    c_src.append(&label("PLAYBACK APPLICATION", "title-sm", false));
     let codec_lbl = label("FLAC", "val-purple", false);
     c_src.append(&codec_lbl);
     let codec_sub = label("Lossless Stream", "sub-purple", false);
@@ -302,7 +315,6 @@ fn build_ui(
 
     root.append(&cards);
 
-
     // ---- Audit strip ----------------------------------------------------
     let audit_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     audit_bar.add_css_class("topbar-box");
@@ -333,8 +345,6 @@ fn build_ui(
             show_history_dialog(&parent, &summary);
         });
     }
-    audit_bar.append(&btn_hist);
-
     let btn_wp = gtk::Button::with_label("WirePlumber Rule");
     btn_wp.add_css_class("btn-cyber");
 
@@ -362,7 +372,11 @@ fn build_ui(
         let tx = audit_tx.clone();
         std::thread::spawn(move || {
             let audit = crate::audit::build_audit(false);
-            let warns = audit.findings.iter().filter(|f| f.severity == "warn").count();
+            let warns = audit
+                .findings
+                .iter()
+                .filter(|f| f.severity == "warn")
+                .count();
             let text = if warns == 0 {
                 "Clean \u{2014} no blocking issues detected".to_string()
             } else {
@@ -467,7 +481,10 @@ fn build_ui(
         let b = gtk::Button::with_label(&format!("Q:{}", q));
         b.add_css_class("btn-cyber");
         b.connect_clicked(move |_| {
-            spawn_bg("pw-metadata", &["-n", "settings", "0", "clock.force-quantum", &q.to_string()]);
+            spawn_bg(
+                "pw-metadata",
+                &["-n", "settings", "0", "clock.force-quantum", &q.to_string()],
+            );
         });
         q_box.append(&b);
     }
@@ -476,11 +493,18 @@ fn build_ui(
     let r_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     r_box.set_homogeneous(true);
     for rt in [44100u32, 48000, 96000, 192000] {
-        let txt = if rt == 44100 { "44.1k".to_string() } else { format!("{}k", rt / 1000) };
+        let txt = if rt == 44100 {
+            "44.1k".to_string()
+        } else {
+            format!("{}k", rt / 1000)
+        };
         let b = gtk::Button::with_label(&txt);
         b.add_css_class("btn-cyber");
         b.connect_clicked(move |_| {
-            spawn_bg("pw-metadata", &["-n", "settings", "0", "clock.force-rate", &rt.to_string()]);
+            spawn_bg(
+                "pw-metadata",
+                &["-n", "settings", "0", "clock.force-rate", &rt.to_string()],
+            );
         });
         r_box.append(&b);
     }
@@ -496,7 +520,11 @@ fn build_ui(
         "sub-text",
         true,
     ));
-    ftr.append(&label("S=Suspended  I=Idle  R=Running  E=Error", "sub-text", true));
+    ftr.append(&label(
+        "S=Suspended  I=Idle  R=Running  E=Error",
+        "sub-text",
+        true,
+    ));
     root.append(&ftr);
 
     win.set_child(Some(&root));
@@ -560,7 +588,6 @@ fn build_ui(
             draw::vu(cr, w as f64, h as f64, aa.vu_level);
         });
     }
-
 
     {
         let a = anim.clone();
@@ -630,7 +657,7 @@ fn build_ui(
                         }
                     }
                 }
-                
+
                 if let Some(ref th) = tray_handle_clone {
                     let is_playing = snap.stream.sr.is_some()
                         || snap.stream.codec.is_some()
@@ -642,11 +669,18 @@ fn build_ui(
                         (crate::tray::TrayHealth::Idle, "STANDBY".to_string())
                     } else if has_dsp {
                         (crate::tray::TrayHealth::Warning, "DSP DETECTED".to_string())
-                    } else if let (Some(source), Some(driver)) = (snap.stream.sr, snap.driver_rate) {
+                    } else if let (Some(source), Some(driver)) = (snap.stream.sr, snap.driver_rate)
+                    {
                         if source == driver {
-                            (crate::tray::TrayHealth::RateMatch, "RATE MATCH (UNVERIFIED)".to_string())
+                            (
+                                crate::tray::TrayHealth::RateMatch,
+                                "RATE MATCH (UNVERIFIED)".to_string(),
+                            )
                         } else {
-                            (crate::tray::TrayHealth::Warning, "RATE MISMATCH".to_string())
+                            (
+                                crate::tray::TrayHealth::Warning,
+                                "RATE MISMATCH".to_string(),
+                            )
                         }
                     } else {
                         (crate::tray::TrayHealth::Unknown, "UNVERIFIED".to_string())
@@ -655,20 +689,34 @@ fn build_ui(
                     let app_name = snap.stream.app.clone().unwrap_or_else(|| "Unknown".into());
                     let codec = snap.stream.codec.as_deref().unwrap_or("Unknown codec");
                     let stream_info = match (snap.stream.sr, snap.stream.bps) {
-                        (Some(rate), Some(bits)) => format!("{} · {}-bit / {:.1} kHz", codec, bits, rate as f64 / 1000.0),
-                        (Some(rate), None) => format!("{} · {:.1} kHz", codec, rate as f64 / 1000.0),
+                        (Some(rate), Some(bits)) => {
+                            format!("{} · {}-bit / {:.1} kHz", codec, bits, rate as f64 / 1000.0)
+                        }
+                        (Some(rate), None) => {
+                            format!("{} · {:.1} kHz", codec, rate as f64 / 1000.0)
+                        }
                         _ => codec.to_string(),
                     };
                     let pipewire_info = match (snap.driver_rate, snap.driver_quantum) {
-                        (Some(rate), Some(q)) => format!("{:.1} kHz · Q{}", rate as f64 / 1000.0, q),
-                        (Some(rate), None) => format!("{:.1} kHz · quantum unknown", rate as f64 / 1000.0),
+                        (Some(rate), Some(q)) => {
+                            format!("{:.1} kHz · Q{}", rate as f64 / 1000.0, q)
+                        }
+                        (Some(rate), None) => {
+                            format!("{:.1} kHz · quantum unknown", rate as f64 / 1000.0)
+                        }
                         (None, Some(q)) => format!("rate unknown · Q{}", q),
                         _ => "Unknown".into(),
                     };
-                    let hw_info = snap.hw.first()
+                    let hw_info = snap
+                        .hw
+                        .first()
                         .map(|hw| format!("{} @ {:.1} kHz", hw.format, hw.rate as f64 / 1000.0))
                         .unwrap_or_else(|| "No open playback PCM".into());
-                    let dsp_info = if has_dsp { snap.processing.join(", ") } else { "None detected".into() };
+                    let dsp_info = if has_dsp {
+                        snap.processing.join(", ")
+                    } else {
+                        "None detected".into()
+                    };
                     let xrun_info = snap.total_err.to_string();
 
                     let _ = th.update(move |t| {
@@ -784,13 +832,13 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
             // pw-top is expensive (~200 ms). Refresh every 4th tick ≈ 2 s.
             if tick % 4 == 0 {
                 let (rows, r, q, e) = pwtop::parse_pw_top();
-                
+
                 // Log new XRUNs to SQLite
                 if e > last_err {
                     let new_xruns = e - last_err;
                     crate::history::log_xruns(new_xruns);
                 }
-                
+
                 last_rows = rows;
                 last_rate = r;
                 last_quant = q;
@@ -804,16 +852,14 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
                 graph = telemetry::PwGraph::load();
             }
             if tick % 2 == 0 {
-                stream = telemetry::mpd_query()
-                    .or_else(telemetry::mpris_query)
-                    .or_else(|| graph.primary_stream())
-                    .unwrap_or_default();
+                stream = telemetry::detect_active_stream(&graph).unwrap_or_default();
                 volume = crate::volume::try_get_volume();
             }
 
             let processing = graph.processing.clone();
 
-            let wait_us = last_rows.iter()
+            let wait_us = last_rows
+                .iter()
                 .find(|r| r.status == 'R' && r.wait_us.is_some())
                 .and_then(|r| r.wait_us);
 
@@ -858,8 +904,16 @@ fn render(
         let text = format!(
             "{:<40} {:>4} {:>8} {:>6} {:>7} {:>7} {:>7} {:>6.1} {:>6.1} {:>4}  {}",
             format!("{}{}", prefix, row.name),
-            row.id, status, row.quant, row.rate, row.wait, row.busy,
-            row.wq, row.bq, row.err, row.fmt
+            row.id,
+            status,
+            row.quant,
+            row.rate,
+            row.wait,
+            row.busy,
+            row.wq,
+            row.bq,
+            row.err,
+            row.fmt
         );
         let css = if row.err > 0 {
             "row-warn"
@@ -922,17 +976,29 @@ fn render(
         ui.combo.set_active_id(Some("default"));
     }
 
-    // Cards
-    let codec = snap.stream.codec.as_deref().unwrap_or("IDLE");
-    ui.codec_lbl.set_text(codec);
+    // Show the actual audio-producing app, even if source codec is unknown.
+    // Codec and bit depth remain visible separately when reliably available.
+    let app_name = snap.stream.app.as_deref().filter(|s| !s.is_empty());
+    let codec = snap.stream.codec.as_deref();
+    ui.codec_lbl.set_text(app_name.or(codec).unwrap_or("IDLE"));
 
-    let app = snap.stream.app.as_deref().unwrap_or("PipeWire");
+    let app = app_name.unwrap_or("Unknown application");
+    let codec_name = codec.unwrap_or("Codec unknown");
     let sub = if let (Some(bps), Some(sr)) = (snap.stream.bps, snap.stream.sr) {
-        format!("{}-bit / {:.1}kHz", bps, sr as f64 / 1000.0)
+        format!(
+            "{} · {}-bit / {:.1}kHz",
+            codec_name,
+            bps,
+            sr as f64 / 1000.0
+        )
+    } else if let Some(sr) = snap.stream.sr {
+        format!("{} · {:.1}kHz", codec_name, sr as f64 / 1000.0)
     } else if let Some(br) = &snap.stream.br {
-        format!("{} • {}", br, app)
+        format!("{} · {}", codec_name, br)
+    } else if app_name.is_some() {
+        codec_name.to_string()
     } else {
-        format!("via {}", app)
+        "No active playback".to_string()
     };
     ui.codec_sub.set_text(&sub);
 
@@ -944,7 +1010,8 @@ fn render(
             .set_text(&format!("samples • {:.1}ms", q as f64 / r as f64 * 1000.0));
     }
     if let Some(r) = snap.driver_rate {
-        ui.rate_lbl.set_text(&format!("{:.1} kHz", r as f64 / 1000.0));
+        ui.rate_lbl
+            .set_text(&format!("{:.1} kHz", r as f64 / 1000.0));
     }
 
     let delta = snap.total_err.saturating_sub(err_baseline.get());
@@ -967,7 +1034,6 @@ fn render(
     let track = snap.stream.track.as_deref().unwrap_or("Active Stream");
     ui.now_lbl.set_text(&format!("♫ [{}] {}", app, track));
 
-
     // Check for DSP notifications
     {
         let mut a = anim.borrow_mut();
@@ -987,12 +1053,12 @@ fn render(
 
     // Feed real telemetry into the animation state
     let max_wq = snap.rows.iter().map(|r| r.wq).fold(0.4f32, f32::max) as f64;
-    let playing = snap.stream.codec.is_some();
+    let playing = snap.stream.codec.is_some() || snap.stream.app.is_some();
     {
         let mut a = anim.borrow_mut();
         a.dsp_load = max_wq;
         a.playing = playing;
-        
+
         // Jitter graph: 0 to 1000us maps to 0-100 on Y axis
         if let Some(wait) = snap.wait_us {
             let norm = ((wait / 1000.0) * 100.0).clamp(0.0, 100.0);
@@ -1002,13 +1068,21 @@ fn render(
 
         // Update Signal Matrix Data
         a.matrix_src_app = snap.stream.app.clone().unwrap_or_else(|| "System".into());
-        a.matrix_src_codec = snap.stream.codec.clone().unwrap_or_else(|| "Unknown".into());
+        a.matrix_src_codec = snap
+            .stream
+            .codec
+            .clone()
+            .unwrap_or_else(|| "Unknown".into());
         a.matrix_dsp = if snap.processing.is_empty() {
             "---".to_string()
         } else {
             snap.processing.join(", ")
         };
-        a.matrix_hw_fmt = snap.hw.first().map(|h| h.format.clone()).unwrap_or_else(|| "---".into());
+        a.matrix_hw_fmt = snap
+            .hw
+            .first()
+            .map(|h| h.format.clone())
+            .unwrap_or_else(|| "---".into());
         a.matrix_rate = snap.driver_rate.unwrap_or(0) as f64 / 1000.0;
     }
 }
@@ -1056,7 +1130,11 @@ fn show_ramp_result_dialog(parent: &gtk::ApplicationWindow, result: &serde_json:
     box_.append(&label(badge_text, badge_css, false));
     box_.append(&label(&detail, "sub-text", false));
     if let Some(wav) = result["wav"].as_str() {
-        box_.append(&label(&format!("Reference WAV: {}", wav), "sub-text", false));
+        box_.append(&label(
+            &format!("Reference WAV: {}", wav),
+            "sub-text",
+            false,
+        ));
     }
 
     let close = gtk::Button::with_label("Close");
@@ -1070,7 +1148,11 @@ fn show_ramp_result_dialog(parent: &gtk::ApplicationWindow, result: &serde_json:
     dialog.present();
 }
 
-fn show_wireplumber_dialog(parent: &gtk::ApplicationWindow, rate: Option<u32>, quantum: Option<u32>) {
+fn show_wireplumber_dialog(
+    parent: &gtk::ApplicationWindow,
+    rate: Option<u32>,
+    quantum: Option<u32>,
+) {
     let rule = crate::wireplumber::generate_rule("alsa_output.*", rate, quantum);
 
     let dialog = gtk::Window::builder()
@@ -1128,8 +1210,10 @@ fn show_network_dialog(parent: &gtk::ApplicationWindow, devices: Vec<String>) {
         .build();
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    box_.set_margin_top(16); box_.set_margin_bottom(16);
-    box_.set_margin_start(16); box_.set_margin_end(16);
+    box_.set_margin_top(16);
+    box_.set_margin_bottom(16);
+    box_.set_margin_start(16);
+    box_.set_margin_end(16);
 
     let title = gtk::Label::new(Some("Discovered Media Renderers:"));
     title.set_xalign(0.0);
@@ -1138,12 +1222,14 @@ fn show_network_dialog(parent: &gtk::ApplicationWindow, devices: Vec<String>) {
 
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_vexpand(true);
-    
+
     let list_box = gtk::ListBox::new();
     list_box.set_selection_mode(gtk::SelectionMode::None);
-    
+
     if devices.is_empty() {
-        let lbl = gtk::Label::new(Some("No devices found. Ensure your streamer is on the same subnet."));
+        let lbl = gtk::Label::new(Some(
+            "No devices found. Ensure your streamer is on the same subnet.",
+        ));
         lbl.set_wrap(true);
         lbl.add_css_class("sub-text");
         list_box.append(&lbl);
@@ -1157,7 +1243,7 @@ fn show_network_dialog(parent: &gtk::ApplicationWindow, devices: Vec<String>) {
             list_box.append(&row);
         }
     }
-    
+
     scroll.set_child(Some(&list_box));
     box_.append(&scroll);
 
@@ -1182,8 +1268,10 @@ fn show_history_dialog(parent: &gtk::ApplicationWindow, summary: &str) {
         .build();
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    box_.set_margin_top(12); box_.set_margin_bottom(12);
-    box_.set_margin_start(12); box_.set_margin_end(12);
+    box_.set_margin_top(12);
+    box_.set_margin_bottom(12);
+    box_.set_margin_start(12);
+    box_.set_margin_end(12);
 
     let text_view = gtk::TextView::new();
     text_view.buffer().set_text(summary);
@@ -1206,7 +1294,12 @@ fn show_history_dialog(parent: &gtk::ApplicationWindow, summary: &str) {
     dialog.present();
 }
 
-fn show_dac_dialog(parent: &gtk::ApplicationWindow, rates: Vec<String>, formats: Vec<String>, dsd: Vec<String>) {
+fn show_dac_dialog(
+    parent: &gtk::ApplicationWindow,
+    rates: Vec<String>,
+    formats: Vec<String>,
+    dsd: Vec<String>,
+) {
     let dialog = gtk::Window::builder()
         .title("DAC Hardware Capabilities")
         .default_width(500)
@@ -1216,15 +1309,21 @@ fn show_dac_dialog(parent: &gtk::ApplicationWindow, rates: Vec<String>, formats:
         .build();
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    box_.set_margin_top(20); box_.set_margin_bottom(20);
-    box_.set_margin_start(20); box_.set_margin_end(20);
+    box_.set_margin_top(20);
+    box_.set_margin_bottom(20);
+    box_.set_margin_start(20);
+    box_.set_margin_end(20);
 
     let lbl_rate = gtk::Label::new(Some("Supported Sample Rates:"));
     lbl_rate.set_xalign(0.0);
     lbl_rate.add_css_class("title-sm");
     box_.append(&lbl_rate);
 
-    let rate_str = if rates.is_empty() { "Not detected".to_string() } else { rates.join(", ") };
+    let rate_str = if rates.is_empty() {
+        "Not detected".to_string()
+    } else {
+        rates.join(", ")
+    };
     let rate_val = gtk::Label::new(Some(&rate_str));
     rate_val.set_xalign(0.0);
     rate_val.set_wrap(true);
@@ -1236,7 +1335,11 @@ fn show_dac_dialog(parent: &gtk::ApplicationWindow, rates: Vec<String>, formats:
     lbl_fmt.add_css_class("title-sm");
     box_.append(&lbl_fmt);
 
-    let fmt_str = if formats.is_empty() { "Not detected".to_string() } else { formats.join(", ") };
+    let fmt_str = if formats.is_empty() {
+        "Not detected".to_string()
+    } else {
+        formats.join(", ")
+    };
     let fmt_val = gtk::Label::new(Some(&fmt_str));
     fmt_val.set_xalign(0.0);
     fmt_val.set_wrap(true);

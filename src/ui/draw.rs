@@ -62,13 +62,19 @@ pub fn gauge(cr: &Context, w: f64, h: f64, load: f64) {
     let frac = (load / 25.0).clamp(0.05, 1.0);
     cr.set_source_rgb(0.06, 0.72, 0.5);
     cr.arc(
-        cx, cy, r,
+        cx,
+        cy,
+        r,
         std::f64::consts::PI,
         std::f64::consts::PI + frac * std::f64::consts::PI,
     );
     let _ = cr.stroke();
 
-    cr.select_font_face("monospace", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+    cr.select_font_face(
+        "monospace",
+        cairo::FontSlant::Normal,
+        cairo::FontWeight::Bold,
+    );
     cr.set_font_size(16.0);
     let txt = format!("{:.1}%", load);
     if let Ok(ext) = cr.text_extents(&txt) {
@@ -82,18 +88,30 @@ pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
     cr.rectangle(0.0, 0.0, w, h);
     let _ = cr.fill();
 
-    cr.select_font_face("monospace", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+    cr.select_font_face(
+        "monospace",
+        cairo::FontSlant::Normal,
+        cairo::FontWeight::Bold,
+    );
     cr.set_font_size(12.0);
 
     let box_w = w - 40.0;
     let box_h = 50.0;
     let x = 20.0;
-    
+
     let trunc = |s: &str, max: usize| -> String {
-        if s.len() > max { format!("{}...", &s[0..max-3]) } else { s.to_string() }
+        if s.len() > max {
+            format!("{}...", &s[0..max - 3])
+        } else {
+            s.to_string()
+        }
     };
 
-    let src_text = format!("{} | {}", trunc(&anim.matrix_src_app, 15), trunc(&anim.matrix_src_codec, 20));
+    let src_text = format!(
+        "{} | {}",
+        trunc(&anim.matrix_src_app, 15),
+        trunc(&anim.matrix_src_codec, 20)
+    );
     let dsp_text = if anim.matrix_dsp.is_empty() || anim.matrix_dsp == "---" {
         "NONE (Bit-Perfect)".to_string()
     } else {
@@ -112,11 +130,11 @@ pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
 
     for (i, (title, val, r, g, b)) in steps.iter().enumerate() {
         let y = gap + (i as f64 * (box_h + gap));
-        
+
         cr.set_source_rgba(*r, *g, *b, 0.1);
         cr.rectangle(x, y, box_w, box_h);
         let _ = cr.fill();
-        
+
         cr.set_source_rgba(*r, *g, *b, 0.8);
         cr.rectangle(x, y, box_w, box_h);
         cr.set_line_width(1.0);
@@ -148,7 +166,7 @@ pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
         }
         last_y = y;
     }
-    
+
     cr.set_source_rgba(0.5, 0.6, 0.7, 0.8);
     cr.set_font_size(10.0);
     cr.move_to(x + 10.0, last_y + box_h + gap + 10.0);
@@ -211,7 +229,11 @@ pub fn scope(cr: &Context, w: f64, h: f64, jitter: &[f64]) {
     }
     let _ = cr.stroke();
 
-    cr.select_font_face("monospace", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.select_font_face(
+        "monospace",
+        cairo::FontSlant::Normal,
+        cairo::FontWeight::Normal,
+    );
     cr.set_font_size(10.0);
     cr.set_source_rgba(0.5, 0.6, 0.7, 0.9);
 
@@ -235,11 +257,15 @@ pub fn vu(cr: &Context, w: f64, h: f64, level: f64) {
     let bars = 18;
     let bw = (2.0f64).max((w - bars as f64 * 2.0) / bars as f64);
     let active = (bars as f64 * level) as usize;
-    
+
     for ch in 0..2 {
         let y = 3.0 + ch as f64 * 10.0;
-        let ch_active = if ch == 1 && active > 1 { active - 1 } else { active };
-        
+        let ch_active = if ch == 1 && active > 1 {
+            active - 1
+        } else {
+            active
+        };
+
         for i in 0..bars {
             if i < ch_active {
                 if (i as f64) > bars as f64 * 0.8 {
@@ -263,7 +289,7 @@ pub fn spectrum(cr: &Context, w: f64, h: f64, heights: &[f64]) {
 
     let bands = heights.len();
     let bw = (3.0f64).max((w - bands as f64 * 3.0) / bands as f64);
-    
+
     for i in 0..bands {
         let bh = heights[i] / 100.0 * (h - 14.0);
         let x = 4.0 + i as f64 * (bw + 2.5);

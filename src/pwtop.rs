@@ -18,10 +18,18 @@ pub struct NodeRow {
 }
 
 fn parse_time_us(s: &str) -> Option<f64> {
-    if s == "?" || s.is_empty() { return None; }
-    if let Some(us) = s.strip_suffix("us") { return us.parse::<f64>().ok(); }
-    if let Some(ms) = s.strip_suffix("ms") { return ms.parse::<f64>().map(|v| v * 1000.0).ok(); }
-    if let Some(sec) = s.strip_suffix("s") { return sec.parse::<f64>().map(|v| v * 1000000.0).ok(); }
+    if s == "?" || s.is_empty() {
+        return None;
+    }
+    if let Some(us) = s.strip_suffix("us") {
+        return us.parse::<f64>().ok();
+    }
+    if let Some(ms) = s.strip_suffix("ms") {
+        return ms.parse::<f64>().map(|v| v * 1000.0).ok();
+    }
+    if let Some(sec) = s.strip_suffix("s") {
+        return sec.parse::<f64>().map(|v| v * 1000000.0).ok();
+    }
     s.parse::<f64>().ok()
 }
 
@@ -86,6 +94,12 @@ fn parse_pct(s: &str) -> f32 {
     let cleaned = s.trim_end_matches('%');
     cleaned
         .parse::<f32>()
-        .map(|v| if v < 1.0 && !s.contains('%') { v * 100.0 } else { v })
+        .map(|v| {
+            if v < 1.0 && !s.contains('%') {
+                v * 100.0
+            } else {
+                v
+            }
+        })
         .unwrap_or(0.0)
 }

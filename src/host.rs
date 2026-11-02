@@ -26,7 +26,7 @@ pub fn host_popen(cmd: &str, args: &[&str]) {
     } else {
         std::process::Command::new(cmd)
     };
-    
+
     let _ = c
         .args(args)
         .stdin(std::process::Stdio::null())

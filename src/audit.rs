@@ -47,9 +47,7 @@ pub fn build_audit(fast: bool) -> Audit {
         .or_else(|| hw.first().map(|h| h.rate));
     let dr_quant = pt_quant.or(graph.driver_quantum);
 
-    let stream = telemetry::mpd_query()
-        .or_else(telemetry::mpris_query)
-        .or_else(|| graph.primary_stream());
+    let stream = telemetry::detect_active_stream(&graph);
 
     let mut findings = Vec::new();
     let mut fixes = Vec::new();
@@ -122,10 +120,7 @@ pub fn build_audit(fast: bool) -> Audit {
                 findings.push(Finding {
                     severity: "warn",
                     check: "Bit-depth widening",
-                    detail: format!(
-                        "Source {}-bit but ALSA receives {}-bit",
-                        src_bits, hw_bits
-                    ),
+                    detail: format!("Source {}-bit but ALSA receives {}-bit", src_bits, hw_bits),
                 });
             }
         }
@@ -162,10 +157,12 @@ pub fn build_audit(fast: bool) -> Audit {
     }
 
     let blocked = findings.iter().any(|f| f.severity == "warn");
-    let verdict = if stream.as_ref().and_then(|s| s.codec.as_ref()).is_none() {
+    let verdict = if stream.is_none() {
         "IDLE".to_string()
     } else if blocked {
         "NOT BIT-PERFECT — see warnings".to_string()
+    } else if src_sr.is_none() {
+        "UNVERIFIED — source sample rate unknown".to_string()
     } else {
         "POTENTIALLY BIT-PERFECT (rate match, no processing)".to_string()
     };

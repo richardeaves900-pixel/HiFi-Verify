@@ -32,6 +32,46 @@ pub struct PwGraph {
     pub driver_quantum: Option<u32>,
 }
 
+// Identify the *producer* of a running playback stream. The /proc comm field
+// is a last resort: Firefox subprocess names may describe a content process
+// rather than the Firefox application, and sandboxed PIDs may be inaccessible.
+fn playback_app_name(props: &serde_json::Value, pid: Option<i32>) -> String {
+    let name = [
+        "application.name",
+        "application.process.binary",
+        "client.name",
+    ]
+    .iter()
+    .filter_map(|key| props.get(*key).and_then(|v| v.as_str()))
+    .map(str::trim)
+    .find(|s| {
+        !s.is_empty()
+            && !matches!(
+                s.to_ascii_lowercase().as_str(),
+                "pipewire" | "pipewire-pulse" | "unknown"
+            )
+    })
+    .map(str::to_owned)
+    .or_else(|| {
+        pid.and_then(|p| std::fs::read_to_string(format!("/proc/{p}/comm")).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+    .unwrap_or_else(|| "Unknown application".to_string());
+
+    match name.to_ascii_lowercase().as_str() {
+        "firefox" | "mozilla firefox" | "firefox-bin" => "Firefox".to_string(),
+        _ => name,
+    }
+}
+
+fn is_playback_candidate(n: &StreamNode) -> bool {
+    let id = format!("{} {}", n.app_name, n.node_name).to_ascii_lowercase();
+    !["easyeffects", "ee_", "filter-chain", "cava", "hifi-verify"]
+        .iter()
+        .any(|term| id.contains(term))
+}
+
 impl PwGraph {
     pub fn load() -> Self {
         let mut g = Self::default();
@@ -44,13 +84,23 @@ impl PwGraph {
         let Some(arr) = v.as_array() else { return g };
 
         let hints = [
-            "easyeffects", "carla", "jamesdsp", "filter-chain",
-            "calf", "lsp-plugins", "compressor", "equalizer",
+            "easyeffects",
+            "carla",
+            "jamesdsp",
+            "filter-chain",
+            "calf",
+            "lsp-plugins",
+            "compressor",
+            "equalizer",
         ];
 
         for obj in arr {
-            let Some(info) = obj.get("info") else { continue };
-            let Some(props) = info.get("props") else { continue };
+            let Some(info) = obj.get("info") else {
+                continue;
+            };
+            let Some(props) = info.get("props") else {
+                continue;
+            };
             let media_class = props
                 .get("media.class")
                 .and_then(|x| x.as_str())
@@ -66,8 +116,7 @@ impl PwGraph {
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
 
-            if state == "running"
-                && (media_class == "Audio/Sink" || media_class == "Audio/Source")
+            if state == "running" && (media_class == "Audio/Sink" || media_class == "Audio/Source")
             {
                 let rate = props.get("audio.rate").and_then(|x| {
                     x.as_u64()
@@ -106,24 +155,13 @@ impl PwGraph {
             }
 
             if media_class.contains("Stream/Output/Audio") && state == "running" {
-                let pid = props
-                    .get("application.process.id")
-                    .and_then(|x| {
-                        x.as_u64()
-                            .map(|n| n as i32)
-                            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
-                    });
-                
-                let mut resolved_app = app.to_string();
-                if let Some(p) = pid {
-                    // Read the actual process name from the kernel
-                    if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", p)) {
-                        let c = comm.trim();
-                        if !c.is_empty() {
-                            resolved_app = c.to_string();
-                        }
-                    }
-                }
+                let pid = props.get("application.process.id").and_then(|x| {
+                    x.as_u64()
+                        .map(|n| n as i32)
+                        .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+                });
+
+                let resolved_app = playback_app_name(props, pid);
 
                 g.streams.push(StreamNode {
                     app_name: resolved_app,
@@ -150,10 +188,8 @@ impl PwGraph {
     }
 
     pub fn primary_stream(&self) -> Option<StreamInfo> {
-        let first_valid = self.streams.iter().find(|n| {
-            let low = format!("{} {}", n.app_name, n.node_name).to_lowercase();
-            !low.contains("easyeffects") && !low.contains("ee_") && !low.contains("filter-chain")
-        }).or_else(|| self.streams.first());
+        // Visualisers and DSP helper nodes are not the audio-producing app.
+        let first_valid = self.streams.iter().find(|n| is_playback_candidate(n));
 
         first_valid.map(|n| {
             let low = format!("{} {}", n.app_name, n.node_name).to_lowercase();
@@ -161,14 +197,12 @@ impl PwGraph {
                 Some("FLAC / Stream".to_string())
             } else if low.contains("high-tide") || low.contains("tidal") {
                 Some("FLAC (Tidal)".to_string())
-            } else if low.contains("chrom") || low.contains("firefox") || low.contains("brave") || low.contains("vivaldi") {
-                Some("Web (Opus/AAC)".to_string())
             } else if low.contains("spotify") {
                 Some("Ogg Vorbis".to_string())
             } else {
                 None
             };
-            
+
             StreamInfo {
                 codec: n.pid.and_then(sniff_pid_files).or(inferred_codec),
                 track: Some(if n.media_name.is_empty() {
@@ -183,6 +217,88 @@ impl PwGraph {
                 mpd: false,
             }
         })
+    }
+}
+
+// A MPRIS media-player ID such as Instance_1_50086 is not an application
+// identity. PipeWire owns application attribution; MPRIS only enriches tracks.
+fn same_app(a: &str, b: &str) -> bool {
+    let key = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    !a.is_empty() && key(a) == key(b)
+}
+
+fn generic_player_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "player" || n == "unknown player" || n.starts_with("instance_")
+}
+
+// Pure selector, so both behaviour and failure modes can be unit-tested.
+fn select_stream(
+    graph: &PwGraph,
+    mpd: Option<StreamInfo>,
+    mpris: Option<StreamInfo>,
+) -> Option<StreamInfo> {
+    if let Some(mut live) = graph.primary_stream() {
+        // MPD reports genuine source format and depth, where available.
+        if live
+            .app
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("mpd"))
+        {
+            return mpd.or(Some(live));
+        }
+
+        if let Some(media) = mpris {
+            let player_name = media.app.as_deref().unwrap_or("");
+            let matches = live
+                .app
+                .as_deref()
+                .is_some_and(|app| same_app(app, player_name));
+            let only_producer = graph
+                .streams
+                .iter()
+                .filter(|n| is_playback_candidate(n))
+                .count()
+                == 1;
+            // Generic media-player IDs are safe to associate only if there is
+            // one eligible running playback producer. Do not invent codecs.
+            if matches || (only_producer && generic_player_name(player_name)) {
+                if let Some(track) = media
+                    .track
+                    .filter(|s| !s.is_empty() && !generic_player_name(s))
+                {
+                    live.track = Some(track);
+                }
+                live.codec = media.codec.or(live.codec);
+                live.sr = media.sr.or(live.sr);
+                live.bps = media.bps.or(live.bps);
+                live.br = media.br.or(live.br);
+            }
+        }
+        return Some(live);
+    }
+
+    // No PipeWire playback node seen: preserve the existing MPD/MPRIS fallback.
+    mpd.or(mpris)
+}
+
+pub fn detect_active_stream(graph: &PwGraph) -> Option<StreamInfo> {
+    match graph.primary_stream() {
+        Some(ref pw)
+            if pw
+                .app
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("mpd")) =>
+        {
+            select_stream(graph, mpd_query(), None)
+        }
+        Some(_) => select_stream(graph, None, mpris_query()),
+        None => select_stream(graph, mpd_query(), mpris_query()),
     }
 }
 
@@ -205,11 +321,9 @@ pub fn flac_header(path: &str) -> Option<(u32, u8, u8)> {
 }
 
 pub fn mpd_query() -> Option<StreamInfo> {
-    let mut s = TcpStream::connect_timeout(
-        &"127.0.0.1:6600".parse().ok()?,
-        Duration::from_millis(250),
-    )
-    .ok()?;
+    let mut s =
+        TcpStream::connect_timeout(&"127.0.0.1:6600".parse().ok()?, Duration::from_millis(250))
+            .ok()?;
     s.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
     let mut greet = [0u8; 256];
     let _ = s.read(&mut greet);
@@ -309,8 +423,10 @@ fn friendly_app_name(bus_name: &str) -> String {
         .split('.')
         .filter(|p| {
             let lower = p.to_lowercase();
-            !matches!(lower.as_str(), "io" | "com" | "org" | "net" | "github" | "gitlab" | "instance")
-                && !lower.chars().all(|c| c.is_ascii_digit())
+            !matches!(
+                lower.as_str(),
+                "io" | "com" | "org" | "net" | "github" | "gitlab" | "instance"
+            ) && !lower.chars().all(|c| c.is_ascii_digit())
         })
         .last()
         .map(|s| {
@@ -351,15 +467,16 @@ pub fn mpris_query() -> Option<StreamInfo> {
         .ok()?;
     let names: Vec<String> = reply.get::<(Vec<String>,)>()?.0;
 
-    for name in names.iter().filter(|n| n.starts_with("org.mpris.MediaPlayer2.")) {
+    for name in names
+        .iter()
+        .filter(|n| n.starts_with("org.mpris.MediaPlayer2."))
+    {
         let Ok(props) = bus.call_sync(
             Some(name.as_str()),
             "/org/mpris/MediaPlayer2",
             "org.freedesktop.DBus.Properties",
             "GetAll",
-            Some(&glib::Variant::from((
-                "org.mpris.MediaPlayer2.Player",
-            ))),
+            Some(&glib::Variant::from(("org.mpris.MediaPlayer2.Player",))),
             Some(glib::VariantTy::new("(a{sv})").ok()?),
             gio::DBusCallFlags::NONE,
             250,
@@ -367,8 +484,7 @@ pub fn mpris_query() -> Option<StreamInfo> {
         ) else {
             continue;
         };
-        let Some(dict) = props.get::<(std::collections::HashMap<String, glib::Variant>,)>()
-        else {
+        let Some(dict) = props.get::<(std::collections::HashMap<String, glib::Variant>,)>() else {
             continue;
         };
         let map = dict.0;
@@ -520,7 +636,7 @@ pub fn send_mpris_command(command: &str) {
         Ok(b) => b,
         Err(_) => return,
     };
-    
+
     let reply = match bus.call_sync(
         Some("org.freedesktop.DBus"),
         "/org/freedesktop/DBus",
@@ -538,7 +654,10 @@ pub fn send_mpris_command(command: &str) {
 
     let names: Vec<String> = reply.get::<(Vec<String>,)>().unwrap().0;
     // Find the first active MPRIS player
-    if let Some(player) = names.iter().find(|n| n.starts_with("org.mpris.MediaPlayer2.")) {
+    if let Some(player) = names
+        .iter()
+        .find(|n| n.starts_with("org.mpris.MediaPlayer2."))
+    {
         let _ = bus.call_sync(
             Some(player.as_str()),
             "/org/mpris/MediaPlayer2",
@@ -550,5 +669,76 @@ pub fn send_mpris_command(command: &str) {
             250,
             gio::Cancellable::NONE,
         );
+    }
+}
+
+#[cfg(test)]
+mod app_attribution_tests {
+    use super::*;
+
+    fn node(app: &str) -> StreamNode {
+        StreamNode {
+            app_name: app.to_string(),
+            node_name: app.to_string(),
+            media_name: format!("{app} audio"),
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn app_name_prefers_pipewire_identity_to_process_name() {
+        let props = serde_json::json!({
+            "application.name": "Firefox",
+            "application.process.binary": "Isolated Web Co",
+        });
+        assert_eq!(playback_app_name(&props, None), "Firefox");
+    }
+
+    #[test]
+    fn binary_fallback_identifies_firefox() {
+        let props = serde_json::json!({ "application.process.binary": "firefox" });
+        assert_eq!(playback_app_name(&props, None), "Firefox");
+    }
+
+    #[test]
+    fn firefox_wins_over_anonymous_youtube_mpris_player() {
+        let graph = PwGraph {
+            streams: vec![node("cava"), node("Firefox")],
+            ..Default::default()
+        };
+        let mpris = StreamInfo {
+            app: Some("Instance_1_50086".to_string()),
+            track: Some("YouTube video title".to_string()),
+            ..Default::default()
+        };
+        let chosen = select_stream(&graph, None, Some(mpris)).unwrap();
+        assert_eq!(chosen.app.as_deref(), Some("Firefox"));
+        assert_eq!(chosen.track.as_deref(), Some("YouTube video title"));
+        assert!(chosen.codec.is_none(), "browser codec must not be guessed");
+    }
+
+    #[test]
+    fn known_mpris_for_another_app_cannot_rename_firefox() {
+        let graph = PwGraph {
+            streams: vec![node("Firefox")],
+            ..Default::default()
+        };
+        let mpris = StreamInfo {
+            app: Some("VLC".to_string()),
+            track: Some("Unrelated track".to_string()),
+            ..Default::default()
+        };
+        let chosen = select_stream(&graph, None, Some(mpris)).unwrap();
+        assert_eq!(chosen.app.as_deref(), Some("Firefox"));
+        assert_ne!(chosen.track.as_deref(), Some("Unrelated track"));
+    }
+
+    #[test]
+    fn no_media_sources_reports_idle() {
+        let graph = PwGraph {
+            streams: vec![node("cava")],
+            ..Default::default()
+        };
+        assert!(select_stream(&graph, None, None).is_none());
     }
 }
