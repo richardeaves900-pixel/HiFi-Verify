@@ -5,19 +5,22 @@ pub struct Anim {
     pub dsp_load: f64,
     pub playing: bool,
     pub vu_level: f64,
-    // Data for the Signal Path Matrix
     pub matrix_src_app: String,
     pub matrix_src_codec: String,
     pub matrix_dsp: String,
     pub matrix_hw_fmt: String,
     pub matrix_rate: f64,
+    pub is_processing: bool,
+    pub alsa_bitperfect: bool,
+    pub alsa_reason: String,
+    #[allow(dead_code)]
+    pub heights: Vec<f64>,
 }
 
 impl Anim {
     pub fn new() -> Self {
         Self {
             jitter: vec![0.0; 50],
-            peaks: vec![0.0; 32], // Kept just in case, but unused
             dsp_load: 1.8,
             playing: false,
             vu_level: 0.0,
@@ -26,6 +29,10 @@ impl Anim {
             matrix_dsp: "---".into(),
             matrix_hw_fmt: "---".into(),
             matrix_rate: 0.0,
+            is_processing: false,
+            alsa_bitperfect: false,
+            alsa_reason: String::new(),
+            heights: vec![0.0; 32],
         }
     }
 
@@ -82,7 +89,6 @@ pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
     let box_h = 50.0;
     let x = 20.0;
     
-    // Truncate strings to prevent overflow
     let trunc = |s: &str, max: usize| -> String {
         if s.len() > max { format!("{}...", &s[0..max-3]) } else { s.to_string() }
     };
@@ -96,31 +102,26 @@ pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
     let hw_text = format!("{} @ {:.1}kHz", anim.matrix_hw_fmt, anim.matrix_rate);
 
     let steps = [
-        ("SOURCE", &src_text, 0.6, 0.4, 1.0), // Purple
-        ("DSP / PROCESSING", &dsp_text, 1.0, 0.8, 0.4), // Gold
-        ("DAC BUS", &hw_text, 0.4, 0.8, 0.6), // Green
+        ("SOURCE", &src_text, 0.6, 0.4, 1.0),
+        ("DSP / PROCESSING", &dsp_text, 1.0, 0.8, 0.4),
+        ("DAC BUS", &hw_text, 0.4, 0.8, 0.6),
     ];
 
-    // Calculate exact vertical positions with even spacing
-    // 3 boxes + 2 gaps = total height. Gap = (h - (3 * box_h)) / 4
     let gap = (h - (3.0 * box_h)) / 4.0;
     let mut last_y = 0.0;
 
     for (i, (title, val, r, g, b)) in steps.iter().enumerate() {
         let y = gap + (i as f64 * (box_h + gap));
         
-        // Draw Box background
         cr.set_source_rgba(*r, *g, *b, 0.1);
         cr.rectangle(x, y, box_w, box_h);
         let _ = cr.fill();
         
-        // Draw Box border
         cr.set_source_rgba(*r, *g, *b, 0.8);
         cr.rectangle(x, y, box_w, box_h);
         cr.set_line_width(1.0);
         let _ = cr.stroke();
 
-        // Draw Text
         cr.set_source_rgba(*r, *g, *b, 0.9);
         cr.move_to(x + 10.0, y + 18.0);
         let _ = cr.show_text(title);
@@ -129,7 +130,6 @@ pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
         cr.move_to(x + 10.0, y + 38.0);
         let _ = cr.show_text(val);
 
-        // Draw downward arrow to next box
         if i < 2 {
             let arrow_x = w / 2.0;
             let arrow_y_start = y + box_h;
@@ -141,7 +141,6 @@ pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
             cr.line_to(arrow_x, arrow_y_end);
             let _ = cr.stroke();
 
-            // Arrow head
             cr.move_to(arrow_x - 5.0, arrow_y_end - 8.0);
             cr.line_to(arrow_x, arrow_y_end);
             cr.line_to(arrow_x + 5.0, arrow_y_end - 8.0);
@@ -150,11 +149,20 @@ pub fn chain_matrix(cr: &Context, w: f64, h: f64, anim: &Anim) {
         last_y = y;
     }
     
-    // Footer
     cr.set_source_rgba(0.5, 0.6, 0.7, 0.8);
     cr.set_font_size(10.0);
     cr.move_to(x + 10.0, last_y + box_h + gap + 10.0);
     let _ = cr.show_text(&format!("Hardware Path: {}", hw_text));
+
+    // ALSA Bit-Perfect Status
+    let (color, icon) = if anim.alsa_bitperfect {
+        ((0.06, 0.72, 0.5), "✓")
+    } else {
+        ((0.96, 0.62, 0.04), "⚠")
+    };
+    cr.set_source_rgba(color.0, color.1, color.2, 1.0);
+    cr.move_to(x + 10.0, last_y + box_h + gap + 28.0);
+    let _ = cr.show_text(&format!("{} ALSA: {}", icon, anim.alsa_reason));
 }
 
 pub fn scope(cr: &Context, w: f64, h: f64, jitter: &[f64]) {
@@ -245,5 +253,30 @@ pub fn vu(cr: &Context, w: f64, h: f64, level: f64) {
             cr.rectangle(i as f64 * (bw + 2.0), y, bw, 6.0);
             let _ = cr.fill();
         }
+    }
+}
+
+pub fn spectrum(cr: &Context, w: f64, h: f64, heights: &[f64]) {
+    cr.set_source_rgba(0.03, 0.05, 0.07, 0.9);
+    cr.rectangle(0.0, 0.0, w, h);
+    let _ = cr.fill();
+
+    let bands = heights.len();
+    let bw = (3.0f64).max((w - bands as f64 * 3.0) / bands as f64);
+    
+    for i in 0..bands {
+        let bh = heights[i] / 100.0 * (h - 14.0);
+        let x = 4.0 + i as f64 * (bw + 2.5);
+        let y = h - bh - 4.0;
+
+        // Main bar (emerald)
+        cr.set_source_rgba(0.06, 0.72, 0.5, 0.85);
+        cr.rectangle(x, y, bw, bh);
+        let _ = cr.fill();
+
+        // Peak cap (cyan)
+        cr.set_source_rgba(0.13, 0.83, 0.93, 0.95);
+        cr.rectangle(x, y, bw, bh.min(6.0));
+        let _ = cr.fill();
     }
 }

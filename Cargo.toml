@@ -14,6 +14,10 @@ glib = "0.22.10"
 cairo-rs = "0.22.9"
 gtk = { version = "0.11", package = "gtk4" }
 gdk = { version = "0.11", package = "gdk4" }
+ksni = { version = "0.3.7", features = ["blocking"] }
+notify-rust = "4.18.2"
+ureq = "3.5.0"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 
 [profile.release]
 lto = "fat"

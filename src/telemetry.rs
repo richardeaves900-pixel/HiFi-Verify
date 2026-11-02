@@ -514,3 +514,41 @@ pub fn sniff_pid_files(pid: i32) -> Option<String> {
     }
     None
 }
+
+pub fn send_mpris_command(command: &str) {
+    let bus = match gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    
+    let reply = match bus.call_sync(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "ListNames",
+        None,
+        Some(glib::VariantTy::new("(as)").ok().unwrap()),
+        gio::DBusCallFlags::NONE,
+        250,
+        gio::Cancellable::NONE,
+    ) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let names: Vec<String> = reply.get::<(Vec<String>,)>().unwrap().0;
+    // Find the first active MPRIS player
+    if let Some(player) = names.iter().find(|n| n.starts_with("org.mpris.MediaPlayer2.")) {
+        let _ = bus.call_sync(
+            Some(player.as_str()),
+            "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2.Player",
+            command,
+            None,
+            None,
+            gio::DBusCallFlags::NONE,
+            250,
+            gio::Cancellable::NONE,
+        );
+    }
+}

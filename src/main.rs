@@ -5,6 +5,12 @@ mod model;
 mod pwtop;
 mod ramp;
 mod telemetry;
+mod cava;
+mod network;
+mod dac;
+mod volume;
+mod history;
+mod tray;
 mod ui;
 mod wireplumber;
 
@@ -32,6 +38,10 @@ struct Args {
     /// Per-PCM hardware detail (format/rate/buffer)
     #[arg(long)]
     hw: bool,
+
+    /// View historical XRUN logs
+    #[arg(long)]
+    history: bool,
 
     /// Run the ramp/null test
     #[arg(long, name = "ramp-test")]
@@ -130,6 +140,11 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
+    if args.history {
+        println!("{}", history::get_history_summary());
+        return std::process::ExitCode::SUCCESS;
+    }
+
     if args.ramp_test {
         println!("{}", serde_json::to_string_pretty(&ramp::run(48000)).unwrap());
         return std::process::ExitCode::SUCCESS;
@@ -143,11 +158,17 @@ fn main() -> std::process::ExitCode {
     }
 
     if args.gui {
-        ui::run();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tray = tray::HiFiTray::new(tx);
+        use ksni::blocking::TrayMethods;
+        let tray_handle = tray.spawn().expect("Failed to spawn system tray");
+        println!("--> System Tray registered on DBus.");
+
+        ui::run(Some(rx), Some(tray_handle));
         return std::process::ExitCode::SUCCESS;
     }
 
     // No args: launch GUI by default
-    ui::run();
+    ui::run(None, None);
     std::process::ExitCode::SUCCESS
 }

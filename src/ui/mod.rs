@@ -38,23 +38,41 @@ struct Ui {
     err_sub: gtk::Label,
     fmt_lbl: gtk::Label,
     now_lbl: gtk::Label,
-    chain_lbl: gtk::Label,
-    badge: gtk::Label,
     gauge_area: gtk::DrawingArea,
     vu_area: gtk::DrawingArea,
     spec_area: gtk::DrawingArea,
     scope_area: gtk::DrawingArea,
 }
 
-pub fn run() {
+pub fn run(
+    tray_rx: Option<std::sync::mpsc::Receiver<()>>,
+    tray_handle: Option<ksni::blocking::Handle<crate::tray::HiFiTray>>,
+) {
     let app = gtk::Application::builder()
         .application_id("org.cachyos.HiFiVerify")
         .build();
-    app.connect_activate(build_ui);
-    let _ = app.run_with_args(&["pwtop-rs"]);
+
+    let tray_rx_shared = std::sync::Arc::new(std::sync::Mutex::new(tray_rx));
+    let tray_handle_shared = std::sync::Arc::new(std::sync::Mutex::new(tray_handle));
+
+    app.connect_activate(move |app| {
+        if let Some(win) = app.windows().first() {
+            win.set_visible(true);
+            win.present();
+            return;
+        }
+        let rx = tray_rx_shared.lock().unwrap().take();
+        let th = tray_handle_shared.lock().unwrap().take();
+        build_ui(app, rx, th);
+    });
+    let _ = app.run_with_args(&["hifi-verify"]);
 }
 
-fn build_ui(app: &gtk::Application) {
+fn build_ui(
+    app: &gtk::Application,
+    tray_rx: Option<std::sync::mpsc::Receiver<()>>,
+    tray_handle: Option<ksni::blocking::Handle<crate::tray::HiFiTray>>,
+) {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(CSS);
     if let Some(display) = gdk::Display::default() {
@@ -104,6 +122,81 @@ fn build_ui(app: &gtk::Application) {
             }
         });
     }
+
+    let btn_net = gtk::Button::with_label("🌐 Scan Network");
+    btn_net.add_css_class("btn-cyber");
+    let (net_tx, net_rx) = std::sync::mpsc::channel::<Vec<String>>();
+    {
+        let net_tx = net_tx.clone();
+        btn_net.connect_clicked(move |_| {
+            let tx = net_tx.clone();
+            std::thread::spawn(move || {
+                let devices = crate::network::scan_network();
+                let _ = tx.send(devices);
+            });
+        });
+    }
+    topbar.append(&btn_net);
+
+    // Hardware Volume Control
+    let vol_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let vol_icon = gtk::Label::new(Some("🔊"));
+    let vol_slider = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
+    vol_slider.set_draw_value(false);
+    vol_slider.set_size_request(100, -1);
+    vol_slider.set_value(crate::volume::get_volume());
+    vol_slider.set_tooltip_text(Some("Hardware DAC Volume (Bit-Perfect)"));
+
+    {
+        vol_slider.connect_value_changed(move |s| {
+            if !s.is_focus() && !s.has_focus() { 
+                // Only update via drag
+            }
+            crate::volume::set_volume(s.value());
+        });
+    }
+    
+    vol_box.append(&vol_icon);
+    vol_box.append(&vol_slider);
+    topbar.append(&vol_box);
+
+    // Media Controls
+    let media_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    media_box.add_css_class("btn-cyber");
+    
+    let btn_prev = gtk::Button::with_label("⏮");
+    btn_prev.set_tooltip_text(Some("Previous Track"));
+    btn_prev.connect_clicked(|_| crate::telemetry::send_mpris_command("Previous"));
+    media_box.append(&btn_prev);
+
+    let btn_play = gtk::Button::with_label("⏯");
+    btn_play.set_tooltip_text(Some("Play / Pause"));
+    btn_play.connect_clicked(|_| crate::telemetry::send_mpris_command("PlayPause"));
+    media_box.append(&btn_play);
+
+    let btn_next = gtk::Button::with_label("⏭");
+    btn_next.set_tooltip_text(Some("Next Track"));
+    btn_next.connect_clicked(|_| crate::telemetry::send_mpris_command("Next"));
+    media_box.append(&btn_next);
+    
+    topbar.append(&media_box);
+
+    // Now Playing Text in the top bar
+    let now_lbl = label("♫ NOW PLAYING: Detecting...", "chain-text", true);
+    now_lbl.set_margin_start(12);
+    now_lbl.set_margin_end(12);
+    topbar.append(&now_lbl);
+
+    let btn_dac = gtk::Button::with_label("🔍 DAC Caps");
+    btn_dac.add_css_class("btn-cyber");
+    {
+        let parent = win.clone();
+        btn_dac.connect_clicked(move |_| {
+            let (rates, formats, dsd) = crate::dac::get_dac_capabilities();
+            show_dac_dialog(&parent, rates, formats, dsd);
+        });
+    }
+    topbar.append(&btn_dac);
 
     for (text, cls, cmd, args) in [
         ("⚙ EasyEffects", "btn-app-green", "easyeffects", vec![]),
@@ -191,16 +284,6 @@ fn build_ui(app: &gtk::Application) {
 
     root.append(&cards);
 
-    // ---- Signal bar ------------------------------------------------------
-    let signal = gtk::Box::new(gtk::Orientation::Horizontal, 14);
-    signal.add_css_class("signal-bar");
-    let now_lbl = label("♫ NOW PLAYING: Detecting...", "chain-text", true);
-    let chain_lbl = label("PATH: [Source] ──► [PipeWire] ──► [DAC]", "sub-purple", true);
-    let badge = label("● READY", "sub-green", true);
-    signal.append(&now_lbl);
-    signal.append(&chain_lbl);
-    signal.append(&badge);
-    root.append(&signal);
 
     // ---- Audit strip ----------------------------------------------------
     let audit_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -213,11 +296,33 @@ fn build_ui(app: &gtk::Application) {
     btn_audit.add_css_class("btn-cyber");
     let btn_ramp = gtk::Button::with_label("Prove Bit-Perfect (Ramp Test)");
     btn_ramp.add_css_class("btn-cyber");
+    let btn_hist = gtk::Button::with_label("📋 XRUN History");
+    btn_hist.add_css_class("btn-cyber");
+    {
+        let parent = win.clone();
+        btn_hist.connect_clicked(move |_| {
+            let summary = crate::history::get_history_summary();
+            show_history_dialog(&parent, &summary);
+        });
+    }
+
+    let btn_hist = gtk::Button::with_label("📋 XRUN History");
+    btn_hist.add_css_class("btn-cyber");
+    {
+        let parent = win.clone();
+        btn_hist.connect_clicked(move |_| {
+            let summary = crate::history::get_history_summary();
+            show_history_dialog(&parent, &summary);
+        });
+    }
+    audit_bar.append(&btn_hist);
+
     let btn_wp = gtk::Button::with_label("WirePlumber Rule");
     btn_wp.add_css_class("btn-cyber");
 
     audit_bar.append(&btn_audit);
     audit_bar.append(&btn_ramp);
+    audit_bar.append(&btn_hist);
     audit_bar.append(&btn_wp);
     root.append(&audit_bar);
 
@@ -316,9 +421,15 @@ fn build_ui(app: &gtk::Application) {
     right.add_css_class("card");
     right.set_size_request(380, -1);
 
-    right.append(&label("SIGNAL PATH MATRIX", "title-sm", false));
+    let toggle_btn = gtk::ToggleButton::with_label("SIGNAL PATH MATRIX");
+    toggle_btn.add_css_class("btn-cyber");
+    right.append(&toggle_btn);
+
+    let spec_data = std::sync::Arc::new(std::sync::Mutex::new(vec![0.0; 32]));
+    crate::cava::spawn_cava_worker(spec_data.clone());
+
     let spec_area = gtk::DrawingArea::new();
-    spec_area.set_content_height(260); // Increased from 130 to fit the matrix
+    spec_area.set_content_height(260);
     spec_area.set_vexpand(true);
     right.append(&spec_area);
 
@@ -327,29 +438,23 @@ fn build_ui(app: &gtk::Application) {
     scope_area.set_vexpand(true);
     right.append(&scope_area);
 
-    // Reset XRUN
     let btn_reset = gtk::Button::with_label("Reset XRUN Counters");
     btn_reset.set_tooltip_text(Some("Reset the cumulative XRUN counter to 0"));
     btn_reset.add_css_class("btn-cyber");
     right.append(&btn_reset);
 
-    // Force quantum
     let q_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     q_box.set_homogeneous(true);
     for q in [64u32, 128, 256, 512, 1024] {
         let b = gtk::Button::with_label(&format!("Q:{}", q));
         b.add_css_class("btn-cyber");
         b.connect_clicked(move |_| {
-            spawn_bg(
-                "pw-metadata",
-                &["-n", "settings", "0", "clock.force-quantum", &q.to_string()],
-            );
+            spawn_bg("pw-metadata", &["-n", "settings", "0", "clock.force-quantum", &q.to_string()]);
         });
         q_box.append(&b);
     }
     right.append(&q_box);
 
-    // Force rate
     let r_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     r_box.set_homogeneous(true);
     for rt in [44100u32, 48000, 96000, 192000] {
@@ -357,10 +462,7 @@ fn build_ui(app: &gtk::Application) {
         let b = gtk::Button::with_label(&txt);
         b.add_css_class("btn-cyber");
         b.connect_clicked(move |_| {
-            spawn_bg(
-                "pw-metadata",
-                &["-n", "settings", "0", "clock.force-rate", &rt.to_string()],
-            );
+            spawn_bg("pw-metadata", &["-n", "settings", "0", "clock.force-rate", &rt.to_string()]);
         });
         r_box.append(&b);
     }
@@ -384,6 +486,46 @@ fn build_ui(app: &gtk::Application) {
     // ---- Shared state + draw callbacks ----------------------------------
     let anim = Rc::new(RefCell::new(Anim::new()));
 
+    // Connect spec_area drawing (Matrix vs Spectrum toggle)
+    {
+        let a = anim.clone();
+        let toggle_btn_draw = toggle_btn.clone();
+        let spec_data_draw = spec_data.clone();
+        spec_area.set_draw_func(move |_, cr, w, h| {
+            if toggle_btn_draw.is_active() {
+                if let Ok(bands) = spec_data_draw.try_lock() {
+                    draw::spectrum(cr, w as f64, h as f64, &bands);
+                }
+            } else {
+                let aa = a.borrow();
+                draw::chain_matrix(cr, w as f64, h as f64, &aa);
+            }
+        });
+    }
+
+    // Connect toggle button
+    {
+        let spec_area_clone = spec_area.clone();
+        toggle_btn.connect_toggled(move |btn| {
+            if btn.is_active() {
+                btn.set_label("AUDIO SPECTRUM");
+            } else {
+                btn.set_label("SIGNAL PATH MATRIX");
+            }
+            spec_area_clone.queue_draw();
+        });
+    }
+
+    // Connect scope_area drawing
+    {
+        let a = anim.clone();
+        scope_area.set_draw_func(move |_, cr, w, h| {
+            let aa = a.borrow();
+            draw::scope(cr, w as f64, h as f64, &aa.jitter);
+        });
+    }
+
+    // Connect gauge_area drawing
     {
         let a = anim.clone();
         gauge_area.set_draw_func(move |_, cr, w, h| {
@@ -391,11 +533,22 @@ fn build_ui(app: &gtk::Application) {
             draw::gauge(cr, w as f64, h as f64, aa.dsp_load);
         });
     }
+
+    // Connect vu_area drawing
     {
         let a = anim.clone();
-        spec_area.set_draw_func(move |_, cr, w, h| {
+        vu_area.set_draw_func(move |_, cr, w, h| {
             let aa = a.borrow();
-            draw::chain_matrix(cr, w as f64, h as f64, &aa);
+            draw::vu(cr, w as f64, h as f64, aa.vu_level);
+        });
+    }
+
+
+    {
+        let a = anim.clone();
+        gauge_area.set_draw_func(move |_, cr, w, h| {
+            let aa = a.borrow();
+            draw::gauge(cr, w as f64, h as f64, aa.dsp_load);
         });
     }
     {
@@ -429,8 +582,6 @@ fn build_ui(app: &gtk::Application) {
         err_sub,
         fmt_lbl,
         now_lbl,
-        chain_lbl,
-        badge,
         gauge_area: gauge_area.clone(),
         vu_area: vu_area.clone(),
         spec_area: spec_area.clone(),
@@ -445,9 +596,61 @@ fn build_ui(app: &gtk::Application) {
         let anim = anim.clone();
         let updating_combo = updating_combo.clone();
         let err_baseline = err_baseline.clone();
+        let tray_handle_clone = tray_handle.clone();
         glib::timeout_add_local(Duration::from_millis(100), move || {
             while let Ok(snap) = rx.try_recv() {
                 render(&ui, &anim, &updating_combo, &err_baseline, &snap);
+                
+                // Sync volume slider if changed externally (e.g. keyboard keys)
+                if !vol_slider.is_focus() {
+                    let current_vol = crate::volume::get_volume();
+                    if (vol_slider.value() - current_vol).abs() > 0.01 {
+                        vol_slider.set_value(current_vol);
+                    }
+                }
+                
+                if let Some(ref th) = tray_handle_clone {
+                    let is_playing = snap.stream.sr.is_some() || snap.stream.codec.is_some();
+                    let has_dsp = !snap.processing.is_empty();
+                    
+                    let (is_bitperfect, status_label) = if !is_playing {
+                        (false, "STANDBY".to_string())
+                    } else if has_dsp {
+                        (false, "DSP ACTIVE".to_string())
+                    } else if let (Some(s), Some(d)) = (snap.stream.sr, snap.driver_rate) {
+                        if s == d {
+                            (true, "BIT-PERFECT".to_string())
+                        } else {
+                            (false, format!("RESAMPLED ({}k➔{}k)", s / 1000, d / 1000))
+                        }
+                    } else {
+                        // No DSP, playing, but source rate unknown. Trust the Matrix.
+                        (true, "BIT-PERFECT".to_string())
+                    };
+
+                    let app_name = snap.stream.app.clone().unwrap_or_else(|| "Idle".to_string());
+                    let codec = snap.stream.codec.clone().unwrap_or_else(|| "---".to_string());
+                    
+                    let stream_info = if let Some(sr) = snap.stream.sr {
+                        format!("{} @ {:.1} kHz", codec, sr as f64 / 1000.0)
+                    } else { codec };
+                    
+                    let hw_info = if let (Some(hw), Some(dr)) = (snap.hw.first(), snap.driver_rate) {
+                        format!("{} @ {:.1} kHz", hw.format, dr as f64 / 1000.0)
+                    } else { "---".to_string() };
+                    
+                    let dsp_info = if has_dsp { snap.processing.join(", ") } else { "None".to_string() };
+
+                    let _ = th.update(|t| {
+                        t.status_label = status_label;
+                        t.is_bitperfect = is_bitperfect;
+                        t.is_playing = is_playing;
+                        t.app_name = app_name;
+                        t.stream_info = stream_info;
+                        t.hw_info = hw_info;
+                        t.dsp_info = dsp_info;
+                    });
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -488,7 +691,34 @@ fn build_ui(app: &gtk::Application) {
         });
     }
 
+    win.set_hide_on_close(true);
+    win.connect_close_request(|win| {
+        win.set_visible(false);
+        glib::Propagation::Stop
+    });
     win.present();
+
+    // Handle System Tray Clicks (Show Window)
+    if let Some(rx) = tray_rx {
+        let win_clone = win.clone();
+        glib::timeout_add_local(Duration::from_millis(200), move || {
+            while let Ok(_) = rx.try_recv() {
+                win_clone.present();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    // Handle Network Scan Results
+    {
+        let win_clone = win.clone();
+        glib::timeout_add_local(Duration::from_millis(200), move || {
+            while let Ok(devices) = net_rx.try_recv() {
+                show_network_dialog(&win_clone, devices);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 }
 
 fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
@@ -503,6 +733,13 @@ fn spawn_worker(tx: std::sync::mpsc::Sender<Snapshot>) {
             // pw-top is expensive (~200 ms). Refresh every 4th tick ≈ 2 s.
             if tick % 4 == 0 {
                 let (rows, r, q, e) = pwtop::parse_pw_top();
+                
+                // Log new XRUNs to SQLite
+                if e > last_err {
+                    let new_xruns = e - last_err;
+                    crate::history::log_xruns(new_xruns);
+                }
+                
                 last_rows = rows;
                 last_rate = r;
                 last_quant = q;
@@ -649,32 +886,22 @@ fn render(
     let track = snap.stream.track.as_deref().unwrap_or("Active Stream");
     ui.now_lbl.set_text(&format!("♫ [{}] {}", app, track));
 
-    let hw_fmt = snap.hw.first().map(|h| h.format.as_str()).unwrap_or("-");
-    ui.chain_lbl.set_text(&format!(
-        "PATH: [{}] ──► [PipeWire] ──► [{} @ {:.1}kHz]",
-        codec,
-        hw_fmt,
-        snap.driver_rate.unwrap_or(0) as f64 / 1000.0
-    ));
 
-    // Badge
-    ui.badge.remove_css_class("sub-green");
-    ui.badge.remove_css_class("sub-red");
-    ui.badge.remove_css_class("sub-text");
-    if !snap.processing.is_empty() {
-        ui.badge.set_text("● PROCESSING ACTIVE");
-        ui.badge.add_css_class("sub-red");
-    } else if let (Some(s), Some(d)) = (snap.stream.sr, snap.driver_rate) {
-        if s != d {
-            ui.badge.set_text(&format!("● RESAMPLED ({}k➔{}k)", s / 1000, d / 1000));
-            ui.badge.add_css_class("sub-red");
+    // Check for DSP notifications
+    {
+        let mut a = anim.borrow_mut();
+        if !snap.processing.is_empty() {
+            if !a.is_processing {
+                a.is_processing = true;
+                let _ = notify_rust::Notification::new()
+                    .summary("HiFi Verify: Compromised")
+                    .body(&format!("DSP active: {}", snap.processing[0]))
+                    .icon("dialog-warning")
+                    .show();
+            }
         } else {
-            ui.badge.set_text("● RATE MATCH");
-            ui.badge.add_css_class("sub-green");
+            a.is_processing = false;
         }
-    } else {
-        ui.badge.set_text("● STANDBY");
-        ui.badge.add_css_class("sub-text");
     }
 
     // Feed real telemetry into the animation state
@@ -808,4 +1035,161 @@ fn show_wireplumber_dialog(parent: &gtk::ApplicationWindow, rate: Option<u32>, q
 
 fn spawn_bg(cmd: &str, args: &[&str]) {
     crate::host::host_popen(cmd, args);
+}
+
+fn show_network_dialog(parent: &gtk::ApplicationWindow, devices: Vec<String>) {
+    let dialog = gtk::Window::builder()
+        .title("Network Streamers (UPnP)")
+        .default_width(450)
+        .default_height(300)
+        .transient_for(parent)
+        .modal(true)
+        .build();
+
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    box_.set_margin_top(16); box_.set_margin_bottom(16);
+    box_.set_margin_start(16); box_.set_margin_end(16);
+
+    let title = gtk::Label::new(Some("Discovered Media Renderers:"));
+    title.set_xalign(0.0);
+    title.add_css_class("title-sm");
+    box_.append(&title);
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    
+    let list_box = gtk::ListBox::new();
+    list_box.set_selection_mode(gtk::SelectionMode::None);
+    
+    if devices.is_empty() {
+        let lbl = gtk::Label::new(Some("No devices found. Ensure your streamer is on the same subnet."));
+        lbl.set_wrap(true);
+        lbl.add_css_class("sub-text");
+        list_box.append(&lbl);
+    } else {
+        for dev in devices {
+            let row = gtk::Label::new(Some(&dev));
+            row.set_xalign(0.0);
+            row.set_margin_top(8);
+            row.set_margin_bottom(8);
+            row.add_css_class("val-purple");
+            list_box.append(&row);
+        }
+    }
+    
+    scroll.set_child(Some(&list_box));
+    box_.append(&scroll);
+
+    let close = gtk::Button::with_label("Close");
+    {
+        let dialog = dialog.clone();
+        close.connect_clicked(move |_| dialog.close());
+    }
+    box_.append(&close);
+
+    dialog.set_child(Some(&box_));
+    dialog.present();
+}
+
+fn show_history_dialog(parent: &gtk::ApplicationWindow, summary: &str) {
+    let dialog = gtk::Window::builder()
+        .title("XRUN History (Last 50)")
+        .default_width(500)
+        .default_height(400)
+        .transient_for(parent)
+        .modal(true)
+        .build();
+
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    box_.set_margin_top(12); box_.set_margin_bottom(12);
+    box_.set_margin_start(12); box_.set_margin_end(12);
+
+    let text_view = gtk::TextView::new();
+    text_view.buffer().set_text(summary);
+    text_view.set_editable(false);
+    text_view.set_monospace(true);
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&text_view));
+    box_.append(&scroll);
+
+    let close = gtk::Button::with_label("Close");
+    {
+        let dialog = dialog.clone();
+        close.connect_clicked(move |_| dialog.close());
+    }
+    box_.append(&close);
+
+    dialog.set_child(Some(&box_));
+    dialog.present();
+}
+
+fn show_dac_dialog(parent: &gtk::ApplicationWindow, rates: Vec<String>, formats: Vec<String>, dsd: Vec<String>) {
+    let dialog = gtk::Window::builder()
+        .title("DAC Hardware Capabilities")
+        .default_width(500)
+        .default_height(350)
+        .transient_for(parent)
+        .modal(true)
+        .build();
+
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    box_.set_margin_top(20); box_.set_margin_bottom(20);
+    box_.set_margin_start(20); box_.set_margin_end(20);
+
+    let lbl_rate = gtk::Label::new(Some("Supported Sample Rates:"));
+    lbl_rate.set_xalign(0.0);
+    lbl_rate.add_css_class("title-sm");
+    box_.append(&lbl_rate);
+
+    let rate_str = if rates.is_empty() { "Not detected".to_string() } else { rates.join(", ") };
+    let rate_val = gtk::Label::new(Some(&rate_str));
+    rate_val.set_xalign(0.0);
+    rate_val.set_wrap(true);
+    rate_val.add_css_class("val-cyan");
+    box_.append(&rate_val);
+
+    let lbl_fmt = gtk::Label::new(Some("Supported PCM Formats:"));
+    lbl_fmt.set_xalign(0.0);
+    lbl_fmt.add_css_class("title-sm");
+    box_.append(&lbl_fmt);
+
+    let fmt_str = if formats.is_empty() { "Not detected".to_string() } else { formats.join(", ") };
+    let fmt_val = gtk::Label::new(Some(&fmt_str));
+    fmt_val.set_xalign(0.0);
+    fmt_val.set_wrap(true);
+    fmt_val.add_css_class("val-purple");
+    box_.append(&fmt_val);
+
+    // DSD Section
+    let lbl_dsd = gtk::Label::new(Some("DSD Support:"));
+    lbl_dsd.set_xalign(0.0);
+    lbl_dsd.add_css_class("title-sm");
+    box_.append(&lbl_dsd);
+
+    let dsd_str = if dsd.is_empty() {
+        "None detected (PCM only)".to_string()
+    } else {
+        format!("Native DSD ({})", dsd.join(", "))
+    };
+    let dsd_val = gtk::Label::new(Some(&dsd_str));
+    dsd_val.set_xalign(0.0);
+    dsd_val.set_wrap(true);
+    if dsd.is_empty() {
+        dsd_val.add_css_class("sub-text");
+    } else {
+        dsd_val.add_css_class("sub-green");
+    }
+    box_.append(&dsd_val);
+
+    let close = gtk::Button::with_label("Close");
+    {
+        let dialog = dialog.clone();
+        close.connect_clicked(move |_| dialog.close());
+    }
+    box_.append(&close);
+
+    dialog.set_child(Some(&box_));
+    dialog.present();
 }
