@@ -1,5 +1,7 @@
 /target
+/dist
 /flatpak/build-dir
 /flatpak/.flatpak-builder
+/flatpak/repo
 *.log
 .DS_Store
