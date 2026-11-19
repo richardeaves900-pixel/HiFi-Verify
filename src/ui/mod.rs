@@ -5,7 +5,9 @@ mod worker;
 use crate::audit::Audit;
 use crate::cava::CavaController;
 use crate::config::{AppConfig, ShortcutKind};
-use crate::model::{format_rate_khz, PathStatus, Sink};
+use crate::model::{
+    format_hifi_rate, format_pcm_bitrate, format_rate_khz, pcm_format_bits, PathStatus, Sink,
+};
 use crate::tray::{HiFiTray, TrayAction};
 use crate::ui::draw::Anim;
 use crate::ui::worker::Snapshot;
@@ -454,6 +456,7 @@ fn build_ui(
     let c3 = card(&cards_row_two, &["card-gold"]);
     c3.append(&label("ACTIVE OUTPUT RATE", "title-sm", false));
     let rate_lbl = label("—", "val-gold", false);
+    rate_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
     c3.append(&rate_lbl);
     let rate_sub = label("Standby", "sub-text", false);
     c3.append(&rate_sub);
@@ -1243,14 +1246,48 @@ fn render(
     }
 
     if let Some(r) = snap.driver_rate {
-        ui.rate_lbl.set_text(&format_rate_khz(r));
-        ui.rate_sub.set_text(if r >= 88_200 {
+        let output_bits = snap
+            .dac_hw
+            .as_ref()
+            .and_then(|h| h.bits)
+            .or_else(|| {
+                snap.path
+                    .as_ref()
+                    .and_then(|p| p.pcm.as_ref())
+                    .and_then(|p| pcm_format_bits(&p.format))
+            })
+            .or(snap.stream.bps);
+        let output_ch = snap.dac_hw.as_ref().and_then(|h| h.channels).or_else(|| {
+            snap.path
+                .as_ref()
+                .and_then(|p| p.pcm.as_ref())
+                .and_then(|p| p.channels)
+        });
+
+        ui.rate_lbl.set_text(&format_hifi_rate(output_bits, r));
+
+        let tier = if r >= 88_200 || output_bits.is_some_and(|b| b >= 24 && r >= 48_000) {
             "Hi-Res PCM"
+        } else if r == 44_100 && output_bits == Some(16) {
+            "CD Quality PCM"
         } else {
             "Standard PCM"
-        });
+        };
+        if let (Some(bits), Some(ch)) = (output_bits, output_ch) {
+            let bitrate = format_pcm_bitrate(r, bits, ch);
+            ui.rate_sub.set_text(&format!("{tier} • {bitrate}"));
+            ui.rate_lbl.set_tooltip_text(Some(&format!(
+                "Active Output: {bits}-bit / {} ({ch}ch, {bitrate})",
+                format_rate_khz(r)
+            )));
+        } else {
+            ui.rate_sub.set_text(tier);
+            ui.rate_lbl
+                .set_tooltip_text(Some(&format!("Active Output: {}", format_rate_khz(r))));
+        }
     } else {
         ui.rate_lbl.set_text("—");
+        ui.rate_lbl.set_tooltip_text(None);
         ui.rate_sub.set_text("Standby");
     }
 

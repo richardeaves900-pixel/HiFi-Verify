@@ -111,13 +111,33 @@ pub fn format_rate_khz(rate_hz: u32) -> String {
     format!("{:.1} kHz", rate_hz as f64 / 1000.0)
 }
 
-/// Compact kHz badge for tight toolbar pills (e.g., 44100 -> "44.1k", 96000 -> "96k").
+/// Compact kHz badge for tight toolbar pills (e.g., 44100 -> "44.1kHz", 96000 -> "96kHz").
 pub fn format_rate_compact(rate_hz: u32) -> String {
     let khz = rate_hz as f64 / 1000.0;
     if (khz - khz.round()).abs() < 0.05 {
         format!("{}kHz", khz.round() as u32)
     } else {
         format!("{:.1}kHz", khz)
+    }
+}
+
+/// Hi-Fi friendly `[Bit Depth]/[Sample Rate]` display (e.g. `24-bit/192kHz`, `32-bit/44.1kHz`).
+pub fn format_hifi_rate(bits: Option<u8>, rate_hz: u32) -> String {
+    let sr = format_rate_compact(rate_hz);
+    match bits {
+        Some(b) if b > 0 => format!("{b}-bit/{sr}"),
+        _ => format_rate_khz(rate_hz),
+    }
+}
+
+/// Uncompressed PCM data rate (e.g. `1411 kbps`, `4608 kbps`, `12.3 Mbps`).
+pub fn format_pcm_bitrate(rate_hz: u32, bits: u8, channels: u32) -> String {
+    let bps = rate_hz as u64 * bits as u64 * channels as u64;
+    let kbps = bps / 1000;
+    if kbps >= 10_000 {
+        format!("{:.1} Mbps", bps as f64 / 1_000_000.0)
+    } else {
+        format!("{kbps} kbps")
     }
 }
 
@@ -146,5 +166,20 @@ mod tests {
         assert_eq!(format_rate_compact(96000), "96kHz");
         assert_eq!(format_rate_compact(88200), "88.2kHz");
         assert_eq!(format_rate_compact(192000), "192kHz");
+    }
+
+    #[test]
+    fn formats_hifi_bit_depth_and_sample_rate() {
+        assert_eq!(format_hifi_rate(Some(32), 192_000), "32-bit/192kHz");
+        assert_eq!(format_hifi_rate(Some(24), 44_100), "24-bit/44.1kHz");
+        assert_eq!(format_hifi_rate(Some(16), 48_000), "16-bit/48kHz");
+        assert_eq!(format_hifi_rate(None, 192_000), "192.0 kHz");
+    }
+
+    #[test]
+    fn formats_uncompressed_pcm_bitrates() {
+        assert_eq!(format_pcm_bitrate(44_100, 16, 2), "1411 kbps");
+        assert_eq!(format_pcm_bitrate(96_000, 24, 2), "4608 kbps");
+        assert_eq!(format_pcm_bitrate(192_000, 32, 2), "12.3 Mbps");
     }
 }
