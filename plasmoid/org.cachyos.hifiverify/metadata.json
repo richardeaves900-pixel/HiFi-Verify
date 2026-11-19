@@ -7,7 +7,7 @@
             }
         ],
         "Category": "Multimedia",
-        "Description": "At-a-glance PipeWire and ALSA hardware audio telemetry pill",
+        "Description": "Desktop and panel audio telemetry widget matching HiFi Verify's dark theme",
         "Icon": "audio-card",
         "Id": "org.cachyos.hifiverify",
         "License": "MIT",

@@ -6,7 +6,8 @@ use crate::audit::Audit;
 use crate::cava::CavaController;
 use crate::config::{AppConfig, ShortcutKind};
 use crate::model::{
-    format_hifi_rate, format_pcm_bitrate, format_rate_khz, pcm_format_bits, PathStatus, Sink,
+    format_hifi_rate, format_hifi_subtitle, format_pcm_bitrate, format_rate_khz, pcm_format_bits,
+    PathStatus, Sink,
 };
 use crate::tray::{HiFiTray, TrayAction};
 use crate::ui::draw::Anim;
@@ -1265,23 +1266,15 @@ fn render(
         });
 
         ui.rate_lbl.set_text(&format_hifi_rate(output_bits, r));
-
-        let tier = if r >= 88_200 || output_bits.is_some_and(|b| b >= 24 && r >= 48_000) {
-            "Hi-Res PCM"
-        } else if r == 44_100 && output_bits == Some(16) {
-            "CD Quality PCM"
-        } else {
-            "Standard PCM"
-        };
+        ui.rate_sub
+            .set_text(&format_hifi_subtitle(output_bits, r, output_ch));
         if let (Some(bits), Some(ch)) = (output_bits, output_ch) {
             let bitrate = format_pcm_bitrate(r, bits, ch);
-            ui.rate_sub.set_text(&format!("{tier} • {bitrate}"));
             ui.rate_lbl.set_tooltip_text(Some(&format!(
                 "Active Output: {bits}-bit / {} ({ch}ch, {bitrate})",
                 format_rate_khz(r)
             )));
         } else {
-            ui.rate_sub.set_text(tier);
             ui.rate_lbl
                 .set_tooltip_text(Some(&format!("Active Output: {}", format_rate_khz(r))));
         }

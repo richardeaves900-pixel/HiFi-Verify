@@ -80,9 +80,11 @@ Many audio utilities declare a stream "bit-perfect" simply because two sample-ra
 - **UPnP / SSDP Network Scanner (`🌐 Scan Network` / `--network-scan`):** Discovers local subnet `MediaRenderer` devices via SSDP multicast and resolves their XML `<friendlyName>` alongside IP addresses.
 - **Loopback Ramp / Null Test (`Loopback Ramp Test` / `--ramp-test`):** Generates a 16-bit PCM ramp WAV, pairs a PipeWire/PulseAudio `.monitor` source with its sink via `pactl`, captures raw PCM through `parec`, and verifies exact sample integrity via `pcm_verify`.
 
-### 7. System Tray Icon & KDE Plasma 6 Panel Widget
+### 7. System Tray Icon & KDE Plasma 6 Desktop / Panel Widget
 - **HiDPI System Tray (`StatusNotifierItem`):** Procedural 32×32 and 64×64 badge with distinct status glyphs and a cyan Hi-Res pip (`>= 88.2 kHz`), rich hover tooltip, live status title (`HiFi Verify · 96kHz S32_LE [CLEAR]`), scroll-wheel ±5% volume control, MPRIS playback controls, desktop notifications when in-route DSP activates, and Flatpak sandbox compatibility (`disable_dbus_name`).
-- **KDE Plasma 6 Toolbar Widget ([plasmoid/org.cachyos.hifiverify](plasmoid/org.cachyos.hifiverify)):** Native Plasma 6 panel pill displaying a color-coded status dot and live rate/format readout (`44.1kHz S32_LE`, `96kHz S32_LE`, `IDLE`), hover tooltip, expandable live telemetry popup, and configurable CLI command/polling interval.
+- **KDE Plasma 6 Desktop & Panel Widget ([plasmoid/org.cachyos.hifiverify](plasmoid/org.cachyos.hifiverify)):**
+  - **Desktop Widget Mode:** Renders directly on your desktop wallpaper in the exact HiFi Verify dark monospace theme (`#080d11` / `#0c141b`), displaying the gold **ACTIVE OUTPUT RATE** (`32-bit/192kHz` + `Hi-Res PCM • 12.3 Mbps`), glowing **Green / Amber / Red / Grey** status indicator LED, Player & DAC Bus mini-cards, configurable card opacity, and an optional compact glance-only mode.
+  - **Panel / Toolbar Mode:** Automatically switches to a sleek compact pill with the status LED and live rate readout when placed in a Plasma panel.
 
 ---
 

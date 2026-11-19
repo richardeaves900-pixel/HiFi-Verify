@@ -141,6 +141,23 @@ pub fn format_pcm_bitrate(rate_hz: u32, bits: u8, channels: u32) -> String {
     }
 }
 
+/// Hi-Fi tier and uncompressed PCM bitrate subtitle shared by GUI and `--status`.
+/// Example: `"Hi-Res PCM • 12.3 Mbps"`, `"CD Quality PCM • 1411 kbps"`, `"Standard PCM"`.
+pub fn format_hifi_subtitle(bits: Option<u8>, rate_hz: u32, channels: Option<u32>) -> String {
+    let tier = if rate_hz >= 88_200 {
+        "Hi-Res PCM"
+    } else if rate_hz == 44_100 && bits == Some(16) {
+        "CD Quality PCM"
+    } else {
+        "Standard PCM"
+    };
+    if let (Some(b), Some(ch)) = (bits, channels) {
+        format!("{tier} • {}", format_pcm_bitrate(rate_hz, b, ch))
+    } else {
+        tier.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

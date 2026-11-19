@@ -18,7 +18,9 @@ mod vu;
 mod wireplumber;
 
 use clap::Parser;
-use model::{format_rate_compact, PathStatus};
+use model::{
+    format_hifi_rate, format_hifi_subtitle, format_rate_compact, pcm_format_bits, PathStatus,
+};
 
 #[derive(Parser)]
 #[command(version, about = "HiFi Verify — PipeWire & ALSA Audio Path Monitor")]
@@ -98,23 +100,24 @@ fn build_status_json(a: &audit::Audit) -> serde_json::Value {
     };
 
     let rate_hz = a.dac_pcm_rate.or(a.driver_rate).or(a.stream_pcm_rate);
+    let output_bits = a
+        .dac_pcm_format
+        .as_deref()
+        .and_then(pcm_format_bits)
+        .or_else(|| a.stream_pcm_format.as_deref().and_then(pcm_format_bits))
+        .or(a.stream_bps);
+    let output_ch = a.dac_pcm_channels.or(a.stream_pcm_channels);
+    let active_output = rate_hz.map(|r| format_hifi_rate(output_bits, r));
+    let active_output_sub = rate_hz
+        .map(|r| format_hifi_subtitle(output_bits, r, output_ch))
+        .unwrap_or_else(|| "Standby".to_string());
+
     let badge = if status == PathStatus::Idle {
         "IDLE".to_string()
+    } else if let Some(ref hifi) = active_output {
+        hifi.clone()
     } else {
-        let mut parts = Vec::new();
-        if let Some(r) = rate_hz {
-            parts.push(format_rate_compact(r));
-        }
-        if let Some(ref fmt) = a.dac_pcm_format {
-            parts.push(fmt.clone());
-        } else if let Some(ref fmt) = a.stream_pcm_format {
-            parts.push(fmt.clone());
-        }
-        if parts.is_empty() {
-            status.short_label().to_string()
-        } else {
-            parts.join(" ")
-        }
+        status.short_label().to_string()
     };
 
     let stream_pcm = a
@@ -144,6 +147,11 @@ fn build_status_json(a: &audit::Audit) -> serde_json::Value {
         "status": status.as_str(),
         "short_label": status.short_label(),
         "badge": badge,
+        "active_output": active_output,
+        "active_output_sub": active_output_sub,
+        "dac_format": a.dac_pcm_format,
+        "bits": output_bits,
+        "channels": output_ch,
         "reason": reason,
         "app": a.stream_app,
         "track": a.stream_track,
@@ -329,7 +337,10 @@ mod tests {
         let json = build_status_json(&a);
         assert_eq!(json["state"], "green");
         assert_eq!(json["short_label"], "CLEAR");
-        assert_eq!(json["badge"], "96kHz S32_LE");
+        assert_eq!(json["badge"], "32-bit/96kHz");
+        assert_eq!(json["active_output"], "32-bit/96kHz");
+        assert_eq!(json["active_output_sub"], "Hi-Res PCM • 6144 kbps");
+        assert_eq!(json["dac_format"], "S32_LE");
         assert_eq!(json["dac_pcm"], "S32_LE 96kHz 2ch");
         assert_eq!(json["stream_pcm"], "S24LE 96kHz 2ch");
         assert_eq!(json["quantum"], 512);
