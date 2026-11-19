@@ -1,17 +1,7 @@
-use crate::model::HwParams;
+use crate::model::{pcm_format_bits, HwParams};
 use std::fs;
 use std::path::Path;
-
-pub fn format_to_bits(fmt: &str) -> Option<u8> {
-    match fmt.to_ascii_uppercase().as_str() {
-        "S8" | "U8" => Some(8),
-        "S16_LE" | "S16_BE" | "U16_LE" | "U16_BE" => Some(16),
-        "S24_LE" | "S24_BE" | "S24_3LE" | "S24_3BE" => Some(24),
-        "S32_LE" | "S32_BE" | "FLOAT_LE" | "FLOAT_BE" => Some(32),
-        "FLOAT64_LE" | "FLOAT64_BE" => Some(64),
-        _ => None,
-    }
-}
+use std::time::Duration;
 
 fn parse_hw(path: &Path, text: &str) -> Option<HwParams> {
     if text.trim().is_empty() || text.contains("closed") {
@@ -30,7 +20,7 @@ fn parse_hw(path: &Path, text: &str) -> Option<HwParams> {
         match key.as_str() {
             "format" => {
                 hp.format = val.to_string();
-                hp.bits = format_to_bits(val);
+                hp.bits = pcm_format_bits(val);
             }
             "rate" => {
                 hp.rate = val
@@ -54,12 +44,12 @@ fn parse_hw(path: &Path, text: &str) -> Option<HwParams> {
 
 pub fn read_alsa_hw_params() -> Vec<HwParams> {
     let mut out = Vec::with_capacity(4);
-    let in_flatpak = std::path::Path::new("/.flatpak-info").exists();
 
-    if in_flatpak {
+    if crate::host::in_flatpak() {
+        // Filter strictly to playback PCM subdevices (pcm*p), never capture (pcm*c).
         if let Ok(o) = crate::host::host_cmd(
-            &["find", "/proc/asound", "-name", "hw_params"],
-            std::time::Duration::from_secs(2),
+            &["find", "/proc/asound", "-path", "*/pcm*p/sub*/hw_params"],
+            Duration::from_secs(2),
         ) {
             let text_out = String::from_utf8_lossy(&o.stdout);
             for path in text_out.lines() {
@@ -67,9 +57,7 @@ pub fn read_alsa_hw_params() -> Vec<HwParams> {
                 if path.is_empty() {
                     continue;
                 }
-                if let Ok(cat) =
-                    crate::host::host_cmd(&["cat", path], std::time::Duration::from_secs(1))
-                {
+                if let Ok(cat) = crate::host::host_cmd(&["cat", path], Duration::from_secs(1)) {
                     let content = String::from_utf8_lossy(&cat.stdout);
                     if let Some(hp) = parse_hw(Path::new(path), &content) {
                         out.push(hp);
@@ -117,48 +105,33 @@ pub fn read_alsa_hw_params() -> Vec<HwParams> {
     out
 }
 
-/// Compare the ALSA hardware params against the source sample rate.
-/// Returns (is_bitperfect, reason).
-pub fn check_alsa_bitperfect(
-    hw_params: &[crate::model::HwParams],
-    source_rate: Option<u32>,
-) -> (bool, String) {
-    let Some(hw) = hw_params.first() else {
-        return (false, "No ALSA hardware found".to_string());
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let Some(src_rate) = source_rate else {
-        return (false, "Source rate unknown".to_string());
-    };
+    #[test]
+    fn parses_open_hw_params_and_ignores_closed() {
+        let open = "\
+access: MMAP_INTERLEAVED
+format: S32_LE
+subformat: STD
+channels: 2
+rate: 96000 (96000/1)
+period_size: 512
+buffer_size: 1024
+";
+        let parsed = parse_hw(Path::new("/proc/asound/card1/pcm0p/sub0/hw_params"), open).unwrap();
+        assert_eq!(parsed.format, "S32_LE");
+        assert_eq!(parsed.bits, Some(32));
+        assert_eq!(parsed.rate, 96000);
+        assert_eq!(parsed.channels, Some(2));
+        assert_eq!(parsed.period_size, Some(512));
+        assert_eq!(parsed.buffer_size, Some(1024));
 
-    if hw.rate != src_rate {
-        return (
-            false,
-            format!("ALSA Resampled ({}Hz ➔ {}Hz)", src_rate, hw.rate),
-        );
+        assert!(parse_hw(
+            Path::new("/proc/asound/card0/pcm0p/sub0/hw_params"),
+            "closed\n"
+        )
+        .is_none());
     }
-
-    // Check for bit-depth widening (e.g. 16-bit file sent as S32_LE)
-    if let Some(hw_bits) = hw.bits {
-        // We don't know the source bit depth from MPRIS alone, so we can only
-        // verify the rate. Bit-depth widening is not a failure per se,
-        // but we flag it for transparency.
-        if hw_bits > 24 {
-            return (
-                true,
-                format!(
-                    "ALSA Bit-Perfect (Rate {}Hz, Format {})",
-                    hw.rate, hw.format
-                ),
-            );
-        }
-    }
-
-    (
-        true,
-        format!(
-            "ALSA Bit-Perfect (Rate {}Hz, Format {})",
-            hw.rate, hw.format
-        ),
-    )
 }

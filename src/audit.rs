@@ -1,5 +1,5 @@
 use crate::alsa_proc::read_alsa_hw_params;
-use crate::model::HwParams;
+use crate::model::{pcm_format_bits, HwParams, PathStatus, PcmFormatStatus};
 use crate::telemetry;
 use serde::Serialize;
 
@@ -26,6 +26,7 @@ pub struct Audit {
     pub driver_quantum: Option<u32>,
     pub stream_codec: Option<String>,
     pub stream_app: Option<String>,
+    pub stream_track: Option<String>,
     pub stream_sr: Option<u32>,
     pub stream_bps: Option<u8>,
     /// Decoded PCM reported by the active PipeWire playback node.
@@ -45,6 +46,7 @@ pub struct Audit {
     pub source_processing_status: &'static str,
     pub source_metadata_status: &'static str,
     pub processing: Vec<String>,
+    pub route_dsp: Vec<String>,
 }
 
 // The ALSA format width is not necessarily the precision of the source PCM.
@@ -74,26 +76,29 @@ fn pcm_width_finding(source_bits: u8, alsa_bits: u8, alsa_format: &str) -> Optio
     }
 }
 
-#[cfg(test)]
-mod pcm_width_tests {
-    use super::*;
-
-    #[test]
-    fn flac_24_bit_to_s32_is_not_a_failure() {
-        let result = pcm_width_finding(24, 32, "S32_LE").expect("format-width info");
-        assert_eq!(result.severity, "info");
-        assert_eq!(result.check, "PCM sample width");
-    }
-
-    #[test]
-    fn reducing_nominal_width_is_a_warning() {
-        let result = pcm_width_finding(24, 16, "S16_LE").expect("potential loss");
-        assert_eq!(result.severity, "warn");
-    }
-
-    #[test]
-    fn matching_width_does_not_establish_sample_identity() {
-        assert!(pcm_width_finding(24, 24, "S24_LE").is_none());
+fn evaluate_pcm_format_status(
+    stream_pcm: Option<&crate::model::PlaybackPcm>,
+    dac: Option<&HwParams>,
+) -> PcmFormatStatus {
+    match (stream_pcm, dac) {
+        (Some(p), Some(h)) if p.rate != h.rate => PcmFormatStatus::RateMismatch,
+        (Some(p), Some(h))
+            if p.channels.is_some() && h.channels.is_some() && p.channels != h.channels =>
+        {
+            PcmFormatStatus::ChannelMismatch
+        }
+        (Some(p), Some(h))
+            if p.format.starts_with('S')
+                && pcm_format_bits(&p.format)
+                    .zip(h.bits)
+                    .is_some_and(|(src, dst)| src > dst) =>
+        {
+            PcmFormatStatus::PrecisionReduction
+        }
+        (Some(p), Some(h)) if p.format.starts_with('S') && h.bits.is_some() => {
+            PcmFormatStatus::Match
+        }
+        _ => PcmFormatStatus::Unknown,
     }
 }
 
@@ -102,10 +107,16 @@ pub fn build_audit(fast: bool) -> Audit {
     let hw = read_alsa_hw_params();
 
     // Fetch the negotiated playback PCM even in fast audit mode. The full
-    // mode additionally evaluates XRUN totals; fast mode leaves those unknown.
-    let (output_rows, _, _, total_err) = crate::pwtop::parse_pw_top();
+    // mode additionally evaluates XRUN totals; fast mode leaves those skipped.
+    let pwtop_snap = crate::pwtop::parse_pw_top();
+    let output_rows = pwtop_snap
+        .as_ref()
+        .map(|s| s.rows.as_slice())
+        .unwrap_or(&[]);
+    let total_err = pwtop_snap.as_ref().map(|s| s.total_err).unwrap_or(0);
+
     let stream = telemetry::detect_active_stream(&graph);
-    let observed = graph.assess_pcm_path(&output_rows, &hw, &stream.clone().unwrap_or_default());
+    let observed = graph.assess_pcm_path(output_rows, &hw, &stream.clone().unwrap_or_default());
     let stream_pcm = observed.pcm.clone();
     let dr_rate = observed.output_rate;
     let dr_quant = observed.output_quantum;
@@ -116,39 +127,19 @@ pub fn build_audit(fast: bool) -> Audit {
     let dac_pcm_format = dac.map(|h| h.format.clone());
     let dac_pcm_rate = dac.map(|h| h.rate);
     let dac_pcm_channels = dac.and_then(|h| h.channels);
-    let pcm_format_status = match (stream_pcm.as_ref(), dac) {
-        (Some(p), Some(h)) if p.rate != h.rate => "rate_mismatch",
-        (Some(p), Some(h))
-            if p.channels.is_some() && h.channels.is_some() && p.channels != h.channels =>
-        {
-            "channel_mismatch"
-        }
-        (Some(p), Some(h))
-            if p.format.starts_with('S')
-                && p.format[1..]
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>()
-                    .parse::<u8>()
-                    .ok()
-                    .zip(h.bits)
-                    .is_some_and(|(src, dst)| src > dst) =>
-        {
-            "precision_reduction"
-        }
-        (Some(p), Some(_)) if p.format.starts_with('S') => "match",
-        _ => "unknown",
-    };
+
+    let pcm_status = evaluate_pcm_format_status(stream_pcm.as_ref(), dac);
+    let pcm_format_status = pcm_status.as_str();
 
     let mut findings = Vec::new();
+    let mut fixes = Vec::new();
+
     if let (Some(p), Some(h)) = (stream_pcm.as_ref(), dac) {
         findings.push(Finding {
-            severity: if pcm_format_status == "match" {
-                "ok"
-            } else if pcm_format_status == "unknown" {
-                "info"
-            } else {
-                "warn"
+            severity: match pcm_status {
+                PcmFormatStatus::Match => "ok",
+                PcmFormatStatus::Unknown => "info",
+                _ => "warn",
             },
             check: "Live PCM format comparison",
             detail: format!(
@@ -164,21 +155,49 @@ pub fn build_audit(fast: bool) -> Audit {
                 pcm_format_status.replace('_', " ")
             ),
         });
+        if pcm_status == PcmFormatStatus::RateMismatch {
+            fixes.push(Fix {
+                label: format!("Match PipeWire clock to {} Hz", p.rate),
+                action: format!("pw-metadata -n settings 0 clock.force-rate {}", p.rate),
+            });
+        }
     }
-
-    let fixes = Vec::new();
 
     let src_sr = stream.as_ref().and_then(|s| s.sr);
     if let Some(route) = graph.unique_playback_route() {
-        findings.push(Finding {
-            severity: "ok",
-            check: "PipeWire route",
-            detail: format!(
-                "Playback node {} directly linked to {}",
-                route.stream_id, route.sink_name
-            ),
-        });
+        if route.is_direct {
+            findings.push(Finding {
+                severity: "ok",
+                check: "PipeWire route",
+                detail: format!(
+                    "Playback node {} directly linked to {}",
+                    route.stream_id, route.sink_name
+                ),
+            });
+        } else {
+            let via = if route.dsp_in_route.is_empty() {
+                "intermediate PipeWire node(s)".to_string()
+            } else {
+                route.dsp_in_route.join(" → ")
+            };
+            findings.push(Finding {
+                severity: "warn",
+                check: "PipeWire route",
+                detail: format!(
+                    "Playback node {} routed via {} to {}",
+                    route.stream_id, via, route.sink_name
+                ),
+            });
+            fixes.push(Fix {
+                label: "Bypass active DSP nodes in playback route".into(),
+                action: format!(
+                    "Route playback directly to {} in qpwgraph or disable {}",
+                    route.sink_name, via
+                ),
+            });
+        }
     }
+
     if let Some(pcm) = &stream_pcm {
         findings.push(Finding {
             severity: "info",
@@ -193,27 +212,18 @@ pub fn build_audit(fast: bool) -> Audit {
             ),
         });
     }
+
     match (src_sr, dr_rate) {
         (Some(src), Some(drv)) if src == drv => findings.push(Finding {
             severity: "ok",
             check: "Source/output rate observation",
-            detail: format!(
-                "Source {}Hz; observed output {}Hz (direct PipeWire route)",
-                src, drv
-            ),
+            detail: format!("Source {}Hz; observed output {}Hz", src, drv),
         }),
-        (Some(src), Some(drv)) => {
-            // The graph driver rate may be from another node. A mismatch
-            // here is evidence of uncertainty, not proof of resampling.
-            findings.push(Finding {
-                severity: "info",
-                check: "Source/output rate observation",
-                detail: format!(
-                    "Source {}Hz; observed output {}Hz (direct PipeWire route)",
-                    src, drv
-                ),
-            });
-        }
+        (Some(src), Some(drv)) => findings.push(Finding {
+            severity: "info",
+            check: "Source/output rate observation",
+            detail: format!("Source {}Hz; observed output {}Hz", src, drv),
+        }),
         (None, Some(drv)) => findings.push(Finding {
             severity: "info",
             check: "Rate",
@@ -241,13 +251,22 @@ pub fn build_audit(fast: bool) -> Audit {
             detail: "No PipeWire DSP/filter nodes observed (upstream processing not excluded)"
                 .into(),
         });
-    } else {
+    } else if observed.route_dsp.is_empty() {
         findings.push(Finding {
             severity: "info",
             check: "Processing",
             detail: format!(
-                "DSP/filter nodes running; not proof they are on the playback route: {}",
+                "DSP/filter nodes running elsewhere (not observed on playback route): {}",
                 graph.processing.join(", ")
+            ),
+        });
+    } else {
+        findings.push(Finding {
+            severity: "warn",
+            check: "Processing",
+            detail: format!(
+                "DSP/filter nodes active in playback route: {}",
+                observed.route_dsp.join(", ")
             ),
         });
     }
@@ -258,6 +277,12 @@ pub fn build_audit(fast: bool) -> Audit {
             check: "Source-side processing",
             detail: info.clone(),
         });
+        fixes.push(Fix {
+            label: "Disable player-side gain/normalization".into(),
+            action:
+                "Set player internal volume to 100% (unity) and disable ReplayGain/normalization"
+                    .into(),
+        });
     } else if stream.as_ref().is_some_and(|s| s.source_processing_checked) {
         findings.push(Finding {
             severity: "info",
@@ -266,22 +291,17 @@ pub fn build_audit(fast: bool) -> Audit {
         });
     }
 
-    // Without an explicit PipeWire-to-ALSA route, never arbitrarily
-    // attribute the first of several active DACs to this player.
-    if let (Some(src), Some(hp)) = (src_sr, graph.hardware_for_route(&hw)) {
+    if let (Some(src), Some(hp)) = (src_sr, dac) {
         if hp.rate != src {
             findings.push(Finding {
                 severity: "warn",
                 check: "Source/ALSA rate difference",
-                detail: format!(
-                    "Source {}Hz, observed ALSA playback {}Hz (direct PipeWire route)",
-                    src, hp.rate
-                ),
+                detail: format!("Source {}Hz, observed ALSA playback {}Hz", src, hp.rate),
             });
         }
     }
 
-    if let Some(hp) = graph.hardware_for_route(&hw) {
+    if let Some(hp) = dac {
         findings.push(Finding {
             severity: "info",
             check: "ALSA hw_params",
@@ -304,7 +324,14 @@ pub fn build_audit(fast: bool) -> Audit {
         findings.push(Finding {
             severity: "info",
             check: "ALSA hw_params",
-            detail: "No open playback PCM".into(),
+            detail: if hw.is_empty() {
+                "No open playback PCM".into()
+            } else {
+                format!(
+                    "{} open ALSA playback PCM device(s), not matched to an active PipeWire playback route",
+                    hw.len()
+                )
+            },
         });
     }
 
@@ -322,44 +349,45 @@ pub fn build_audit(fast: bool) -> Audit {
         });
     }
 
-    if stream.as_ref().map_or(false, |s| s.mpd) {
+    if stream.as_ref().is_some_and(|s| s.mpd) {
         for issue in telemetry::mpd_config_check() {
             findings.push(Finding {
                 severity: "warn",
                 check: "MPD",
-                detail: issue,
+                detail: issue.clone(),
+            });
+            fixes.push(Fix {
+                label: "Review MPD audio_output configuration".into(),
+                action: issue,
             });
         }
     }
 
-    // This is a monitor: rate equality alone does not establish sample identity.
-    // Do not penalise unknown metadata or require special player extensions.
     let source_metadata_status = match stream.as_ref() {
         None => "not_applicable",
         Some(s) if s.codec.is_some() && s.sr.is_some() && s.bps.is_some() => "complete",
         Some(s) if s.codec.is_some() || s.sr.is_some() || s.bps.is_some() => "partial",
         Some(_) => "not_exposed",
     };
-    // The same route-aware decision drives audit and GUI. pw-top ERR values
-    // are cumulative and are NOT treated as fresh failures on each audit.
-    let audio_path_status = observed.status;
+
+    let audio_path_status = observed.status.as_str();
     findings.push(Finding {
         severity: match observed.status {
-            "clear" => "ok",
-            "altered" => "warn",
-            _ => "info",
+            PathStatus::Clear => "ok",
+            PathStatus::Altered => "warn",
+            PathStatus::Idle | PathStatus::Unknown => "info",
         },
         check: "Connected PCM route",
         detail: observed.explanation.clone(),
     });
-    let verdict = if stream.is_none() {
-        "IDLE".to_string()
-    } else if audio_path_status == "clear" {
-        "PCM PATH CLEAR — original sample identity not verified".to_string()
-    } else if audio_path_status == "altered" {
-        "AUDIO PATH ALTERATION OR RATE DIFFERENCE DETECTED".to_string()
-    } else {
-        "UNVERIFIED — insufficient evidence to confirm bit-perfect audio".to_string()
+
+    let verdict = match observed.status {
+        PathStatus::Idle => "IDLE".to_string(),
+        PathStatus::Clear => "PCM PATH CLEAR — original sample identity not verified".to_string(),
+        PathStatus::Altered => "AUDIO PATH ALTERATION OR RATE DIFFERENCE DETECTED".to_string(),
+        PathStatus::Unknown => {
+            "UNVERIFIED — insufficient evidence to confirm bit-perfect audio".to_string()
+        }
     };
 
     Audit {
@@ -371,6 +399,7 @@ pub fn build_audit(fast: bool) -> Audit {
         driver_quantum: dr_quant,
         stream_codec: stream.as_ref().and_then(|s| s.codec.clone()),
         stream_app: stream.as_ref().and_then(|s| s.app.clone()),
+        stream_track: stream.as_ref().and_then(|s| s.track.clone()),
         stream_sr: src_sr,
         stream_bps: stream.as_ref().and_then(|s| s.bps),
         stream_pcm_format: pcm_format,
@@ -381,9 +410,14 @@ pub fn build_audit(fast: bool) -> Audit {
         dac_pcm_channels,
         pcm_format_status,
         audio_path_status,
-        source_processing: stream.as_ref().and_then(|s|
-            s.source_processing.clone().or_else(|| s.source_processing_checked.then(||
-                "Player reports normalization off and internal gain unity (other processing unverified)".to_string()))),
+        source_processing: stream.as_ref().and_then(|s| {
+            s.source_processing.clone().or_else(|| {
+                s.source_processing_checked.then(|| {
+                    "Player reports normalization off and internal gain unity (other processing unverified)"
+                        .to_string()
+                })
+            })
+        }),
         source_metadata_status,
         source_processing_status: match stream.as_ref() {
             None => "not_applicable",
@@ -392,5 +426,29 @@ pub fn build_audit(fast: bool) -> Audit {
             Some(_) => "unknown",
         },
         processing: graph.processing.clone(),
+        route_dsp: observed.route_dsp,
+    }
+}
+
+#[cfg(test)]
+mod pcm_width_tests {
+    use super::*;
+
+    #[test]
+    fn flac_24_bit_to_s32_is_not_a_failure() {
+        let result = pcm_width_finding(24, 32, "S32_LE").expect("format-width info");
+        assert_eq!(result.severity, "info");
+        assert_eq!(result.check, "PCM sample width");
+    }
+
+    #[test]
+    fn reducing_nominal_width_is_a_warning() {
+        let result = pcm_width_finding(24, 16, "S16_LE").expect("potential loss");
+        assert_eq!(result.severity, "warn");
+    }
+
+    #[test]
+    fn matching_width_does_not_establish_sample_identity() {
+        assert!(pcm_width_finding(24, 24, "S24_LE").is_none());
     }
 }

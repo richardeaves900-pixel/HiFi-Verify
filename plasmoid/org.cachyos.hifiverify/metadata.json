@@ -1,0 +1,18 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "HiFi Verify Contributors"
+            }
+        ],
+        "Category": "Multimedia",
+        "Description": "At-a-glance PipeWire and ALSA hardware audio telemetry pill",
+        "Icon": "audio-card",
+        "Id": "org.cachyos.hifiverify",
+        "License": "MIT",
+        "Name": "HiFi Verify",
+        "Version": "5.0.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
