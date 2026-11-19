@@ -176,7 +176,43 @@ Launch the app:
 flatpak run org.cachyos.HiFiVerify
 ```
 
-### Option 2: Native Cargo Build
+### Option 2: Portable USB Edition (Zero-Install / Any Linux PC)
+
+Run HiFi Verify directly off a USB drive (FAT32, exFAT, NTFS, or ext4) without installing anything, or carry a single-file Flatpak bundle for older/immutable distros.
+
+- **Pre-built download:** Grab `HiFi-Verify-Portable-x86_64.tar.gz` (or the standalone `HiFi-Verify-x86_64.flatpak` bundle) from the [GitHub Releases](https://github.com/richardeaves900-pixel/HiFi-Verify/releases) page, extract `HiFi-Verify-USB/` onto your USB stick, and run:
+- **Or build your own USB kit from source:**
+
+```bash
+bash scripts/build-portable.sh
+# Outputs:
+#   dist/HiFi-Verify-USB/
+#   dist/HiFi-Verify-Portable-x86_64.tar.gz
+```
+
+On any target Linux x86_64 PC, open a terminal inside `HiFi-Verify-USB/` on the USB drive:
+
+```bash
+# Zero-install portable run (works even on FAT32/exFAT `noexec` USB mounts):
+sh run-hifi-verify.sh
+sh run-hifi-verify.sh --audit --fast
+
+# Use the host PC's ~/.config instead of the USB's ./data/ folder:
+sh run-hifi-verify.sh --system-config
+
+# Universal fallback for older glibc (< 2.39) or systems without GTK4 (Ubuntu 22.04, Debian 12, Silverblue):
+sh install-flatpak.sh
+
+# Optional KDE Plasma 6 toolbar widget install from USB:
+sh install-plasmoid.sh
+```
+
+What `run-hifi-verify.sh` handles automatically:
+- **FAT32 / exFAT `noexec` auto-staging:** If the USB drive cannot execute binaries directly, it transparently stages `bin/hifi-verify` into `$XDG_RUNTIME_DIR` (or `/tmp/hifi-verify-portable-<uid>`) and launches from there.
+- **Portable USB storage:** Exports `XDG_CONFIG_HOME` to `./data/` on the USB drive so your configured shortcuts (`config.json`) and XRUN history (`history.db`) travel with you.
+- **Graceful distro fallback:** Verifies GTK4/glibc compatibility before launch and guides/falls back to the bundled `HiFi-Verify-x86_64.flatpak` when needed.
+
+### Option 3: Native Cargo Build
 
 Requires Rust stable and GTK4 development headers (`libgtk-4-dev` on Debian/Ubuntu, `gtk4` on Arch/CachyOS, `gtk4-devel` on Fedora):
 
@@ -245,6 +281,8 @@ plasmoid/
 └── org.cachyos.hifiverify/  # KDE Plasma 6 panel widget (QML + KConfig)
 flatpak/
 └── org.cachyos.HiFiVerify.yaml  # Flatpak build manifest and sandbox permissions
+scripts/
+└── build-portable.sh            # Portable USB kit & single-file .flatpak bundle builder
 ```
 
 ---
